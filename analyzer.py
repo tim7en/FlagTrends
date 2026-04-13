@@ -16,32 +16,56 @@ signal is a reversal of a prior downtrend (more significant) or a continuation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+
+
+# ── Timeframe definitions (trading bars) ─────────────────────────────────────
+
+TIMEFRAMES: dict[str, int] = {
+    "2M":  42,
+    "4M":  84,
+    "6M": 126,
+    "1Y": 252,
+}
+
+
+@dataclass
+class TimeframeTrend:
+    label:      str
+    bars:       int
+    direction:  str    # BULLISH / BEARISH / NEUTRAL / N/A
+    change_pct: float  # price change % over the window
+    above_sma:  bool | None  # close > mean(close) for the window
 
 
 # ── Data class ────────────────────────────────────────────────────────────────
 
 @dataclass
 class TrendSignal:
-    symbol:         str
-    asset_name:     str
-    asset_type:     str
-    ticker:         str
-    price:          float
-    sma20:          float | None
-    sma50:          float | None
-    sma200:         float | None
-    rsi:            float | None
-    ema_cross:      int    # +1 / -1 / 0
-    price_ma_break: int    # +1 / -1 / 0
-    donchian_break: int    # +1 / -1 / 0
-    score:          int    # sum of the three signals
-    direction:      str    # BULLISH BREAK / BEARISH BREAK / WEAK BULLISH / WEAK BEARISH / NEUTRAL
-    prior_trend:    str    # UP / DOWN / SIDEWAYS / UNKNOWN
-    signals_desc:   str    # human-readable list of triggered signals
+    symbol:            str
+    asset_name:        str
+    asset_type:        str
+    ticker:            str
+    price:             float
+    sma20:             float | None
+    sma50:             float | None
+    sma200:            float | None
+    rsi:               float | None
+    ema_cross:         int    # +1 / -1 / 0
+    price_ma_break:    int    # +1 / -1 / 0
+    donchian_break:    int    # +1 / -1 / 0
+    score:             int    # sum of the three signals
+    direction:         str    # BULLISH BREAK / BEARISH BREAK / WEAK BULLISH / WEAK BEARISH / NEUTRAL
+    prior_trend:       str    # UP / DOWN / SIDEWAYS / UNKNOWN
+    signals_desc:      str    # human-readable list of triggered signals
+    week52_high:       float | None = None
+    week52_low:        float | None = None
+    pct_from_52w_high: float | None = None  # ≤0: how far below the high
+    pct_from_52w_low:  float | None = None  # ≥0: how far above the low
+    timeframes:        dict[str, TimeframeTrend] = field(default_factory=dict)
 
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -78,6 +102,41 @@ def _sign_cross(series: pd.Series, window: int) -> int:
         if last < 0:
             return -1
     return 0
+
+
+# ── Multi-timeframe trend ─────────────────────────────────────────────────────
+
+def analyze_timeframes(close: pd.Series) -> dict[str, TimeframeTrend]:
+    """
+    For each timeframe window (2M / 4M / 6M / 1Y), compute a simple trend
+    direction based on the percentage price change and whether the current
+    close is above the window's SMA.
+    """
+    results: dict[str, TimeframeTrend] = {}
+    for label, bars in TIMEFRAMES.items():
+        if len(close) < bars:
+            results[label] = TimeframeTrend(
+                label=label, bars=bars,
+                direction="N/A", change_pct=0.0, above_sma=None,
+            )
+            continue
+        segment   = close.iloc[-bars:]
+        current   = float(segment.iloc[-1])
+        start     = float(segment.iloc[0])
+        sma_val   = float(segment.mean())
+        chg       = (current - start) / start * 100.0 if start != 0 else 0.0
+        above_sma = current > sma_val
+        if chg > 2.0:
+            direction = "BULLISH"
+        elif chg < -2.0:
+            direction = "BEARISH"
+        else:
+            direction = "NEUTRAL"
+        results[label] = TimeframeTrend(
+            label=label, bars=bars,
+            direction=direction, change_pct=round(chg, 2), above_sma=above_sma,
+        )
+    return results
 
 
 # ── Signal detectors ─────────────────────────────────────────────────────────
@@ -189,6 +248,18 @@ def analyze(
     score          = ema_cross + price_ma_break + donchian
     prior_trend    = determine_prior_trend(close, medium_ma, long_ma)
 
+    # ── 52-week high / low ──
+    w52_bars = min(252, len(close))
+    w52_slice = close.iloc[-w52_bars:]
+    week52_high_val = float(w52_slice.max())
+    week52_low_val  = float(w52_slice.min())
+    price_f         = _fmt(price_val) or 0.0
+    pct_from_high   = round((price_f - week52_high_val) / week52_high_val * 100, 2) if week52_high_val else None
+    pct_from_low    = round((price_f - week52_low_val)  / week52_low_val  * 100, 2) if week52_low_val  else None
+
+    # ── Multi-timeframe trends ──
+    tf_trends = analyze_timeframes(close)
+
     # ── Direction label ──
     if score >= 2:
         direction = "BULLISH BREAK"
@@ -216,7 +287,7 @@ def analyze(
         asset_name=asset_name,
         asset_type=asset_type,
         ticker=ticker,
-        price=_fmt(price_val) or 0.0,
+        price=price_f,
         sma20=_fmt(sma20_val),
         sma50=_fmt(sma50_val),
         sma200=_fmt(sma200_val),
@@ -228,4 +299,9 @@ def analyze(
         direction=direction,
         prior_trend=prior_trend,
         signals_desc=signals_desc,
+        week52_high=round(week52_high_val, 4),
+        week52_low=round(week52_low_val, 4),
+        pct_from_52w_high=pct_from_high,
+        pct_from_52w_low=pct_from_low,
+        timeframes=tf_trends,
     )
