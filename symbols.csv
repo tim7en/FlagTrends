@@ -1,0 +1,138 @@
+asset_name,symbol,asset_type
+Brent Crude Oil,BRN,Commodity
+Light Sweet Crude Oil,CL,Commodity
+Cocoa,COCOA,Commodity
+Coffee,COFFEE,Commodity
+Corn,CORN,Commodity
+Copper,HG,Commodity
+Heating Oil,HO,Commodity
+Henry Hub Natural Gas,NG,Commodity
+Palladium,PA,Commodity
+Platinum,PL,Commodity
+Soybean,SOYBEAN,Commodity
+Sugar,SUGAR,Commodity
+Wheat,WHEAT,Commodity
+WTI Crude Oil,WT,Commodity
+Silver,XAGUSD,Commodity
+Trade Gold,XAUUSD,Commodity
+ALCOA Inc.,AA,Stock
+Apple Inc.,AAPL,Stock
+Ambev S.A.,ABEV,Stock
+Aurora Cannabis Inc.,ACB,Stock
+Adobe Systems Inc.,ADBE,Stock
+Adidas AG,ADS,Stock
+Airbus SE,AIR,Stock
+Air France-KLM SA,AIRF,Stock
+"AMC Entertainment Holdings, Inc.",AMC,Stock
+"Advanced Micro Devices, Inc.",AMD,Stock
+Amazon.com Inc.,AMZN,Stock
+Activision Blizzard,ATVI,Stock
+American Express Co.,AXP,Stock
+Boeing Co.,BA,Stock
+Alibaba Group Holding Ltd.,BABA,Stock
+Bank of America Corp.,BAC,Stock
+BASF SE,BAS,Stock
+BAYER AG,BAYN,Stock
+Baidu Inc.,BIDU,Stock
+Bayerische Motoren Werke AG,BMW,Stock
+BNP Paribas SA,BNPQY,Stock
+Banco Santander Chile,BSAC,Stock
+Citigroup Inc.,C,Stock
+Caterpillar Inc.,CAT,Stock
+Carnival Corp,CCL,Stock
+Coinbase Global Inc,COIN,Stock
+Salesforce.com Inc.,CRM,Stock
+Cronos Group Inc.,CRON,Stock
+Cisco Systems Inc.,CSCO,Stock
+Daimler AG,DAI,Stock
+Deutsche Bank AG,DBK,Stock
+VINCI SA,DG,Stock
+Walt Disney Co.,DIS,Stock
+Dropbox Inc.,Dropbox,Stock
+eBay Inc.,EBAY,Stock
+Estée Lauder,EL,Stock
+ENEL SPA,ENEL,Stock
+ENI SPA,ENI,Stock
+Enel Chile S.A.,ENIC,Stock
+Ethan Allen Interiors,ETH,Stock
+Ford Motor Co.,F,Stock
+Facebook Inc.,FB,Stock
+Freeport-McMoRan Inc.,FCX,Stock
+TOTAL SA,FP,Stock
+Grayscale Bitcoin Trust BTC,GBTC,Stock
+General Electrics Co.,GE,Stock
+Gilead Sciences,GILD,Stock
+GameStop Corp.,GME,Stock
+Google Inc.,GOOGL,Stock
+Goldman Sachs Group Inc.,GS,Stock
+Home Depot Inc.,HD,Stock
+Harley-Davidson Inc.,HOG,Stock
+Robinhood Markets Inc,HOOD,Stock
+Hewlett-Packard Co.,HPQ,Stock
+IBM Corp.,IBM,Stock
+Industrial & Commercial Bank of China,IDCB,Stock
+Intel Corp.,INTC,Stock
+IndiTex SA,ITX,Stock
+Johnson&Johnson,JNJ,Stock
+JPMorgan Chase and Co.,JPM,Stock
+Nordstrom Inc,JWN,Stock
+The Coca-Cola Co.,KO,Stock
+Michael Kors Holdings Ltd,KORS,Stock
+Lenovo Group,LNVG,Stock
+Southwest Airlines Co,LUV,Stock
+LYFT Inc.,LYFT,Stock
+MasterCard Inc.,MA,Stock
+Marathon Patent Group INC,MARA,Stock
+McDonald's Corp.,MCD,Stock
+Moderna,MRNA,Stock
+Microsoft Corp.,MSFT,Stock
+"Micron Technology, Inc.",MU,Stock
+Norwegian Cruise Line Holdings Ltd,NCLH,Stock
+Nintendo (JP) Co. Ltd.,NINTENDO_JP,Stock
+Nintendo (US) Co. Ltd.,NINTENDO_US,Stock
+Nike Inc.,NKE,Stock
+NVIDIA Corp.,NVDA,Stock
+Netflix Inc.,Netflix,Stock
+Oracle Corp.,ORCL,Stock
+Petrobras S.A.,PBR,Stock
+Pfizer Inc.,PFE,Stock
+Procter & Gamble Co.,PG,Stock
+Pinterest,PINS,Stock
+Philip Morris International Inc.,PM,Stock
+PVH Corp,PVH,Stock
+Ferrari,RACE,Stock
+Royal Caribbean Cruises Ltd.,RCL,Stock
+Repsol SA,REP,Stock
+Ralph Lauren Cor,RL,Stock
+Renault SA,RNLSY,Stock
+Ryanair Holdings plc,RYAAY,Stock
+SAP SE,SAP,Stock
+Spirit Airlines Incorporated,SAVE,Stock
+Starbucks Corp.,SBUX,Stock
+Siemens AG,SIE,Stock
+Sirius XM Holdings Inc.,SIRI,Stock
+Snap Inc.,SNAP,Stock
+Virgin Galactic Holdings Inc,SPCE,Stock
+Sociedad Quimica y Minera de Chile,SQM,Stock
+Survey Monkey,SVMK,Stock
+Spotify Technology,Spotify,Stock
+AT&T Inc.,T,Stock
+Tencent Holdings,TCTZ,Stock
+Tilray Brands Inc.,TLRY,Stock
+Toyota Motor Corp.,TM,Stock
+TripAdvisor Inc.,TRIP,Stock
+The Travelers Companies Inc.,TRV,Stock
+Tesla Motors Inc.,TSLA,Stock
+TUI AG,TUI,Stock
+Uber Technologies,UBER,Stock
+UnitedHealth Group Inc.,UNH,Stock
+Visa Inc.,V,Stock
+Vale S.A.,VALE,Stock
+VF Corp,VFC,Stock
+Volkswagen AG,VOW,Stock
+Verizon Communications Inc.,VZ,Stock
+Canopy Growth Corp,WEED,Stock
+Wells Fargo & Co.,WFC,Stock
+Williams-Sonoma,WSM,Stock
+"Wynn Resorts, Limited",WYNN,Stock
+Exxon Mobil Corp.,XOM,Stock
