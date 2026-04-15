@@ -73,6 +73,18 @@ def _load_symbols(path: str = "symbols.csv") -> list[dict]:
         return list(csv.DictReader(fh))
 
 
+def _normalize_symbols(symbols: list[dict]) -> list[dict]:
+    """Ensure each symbol dict has asset_type/asset_name, derive yfinance ticker."""
+    for s in symbols:
+        if "asset_type" not in s:
+            url = s.get("url", "")
+            parts = url.strip("/").split("/")
+            s["asset_type"] = parts[1].capitalize() if len(parts) > 2 else "Stock"
+        if "asset_name" not in s:
+            s["asset_name"] = s.get("name", "") or s["symbol"]
+    return symbols
+
+
 @st.cache_data(ttl=300, show_spinner="Fetching & analysing market data…")
 def _run(asset_type: str) -> tuple[list[dict], dict[str, pd.DataFrame]]:
     """
@@ -80,14 +92,13 @@ def _run(asset_type: str) -> tuple[list[dict], dict[str, pd.DataFrame]]:
         rows     – flat list of dicts (one per key level, all symbols)
         raw      – OHLCV DataFrames keyed by Libertex symbol
     """
-    symbols = _load_symbols()
+    symbols = _normalize_symbols(_load_symbols())
     if asset_type != "All":
         symbols = [s for s in symbols if s["asset_type"].lower() == asset_type.lower()]
 
     sym_ticker = {
-        s["symbol"]: config.SYMBOL_MAP[s["symbol"]]
+        s["symbol"]: config.SYMBOL_MAP.get(s["symbol"], s["symbol"])
         for s in symbols
-        if s["symbol"] in config.SYMBOL_MAP
     }
     name_map = {s["symbol"]: s["asset_name"] for s in symbols}
     type_map = {s["symbol"]: s["asset_type"]  for s in symbols}
@@ -145,14 +156,13 @@ def _run_trend_scan(asset_type: str) -> list[dict]:
     price, 52w high/low, trend direction for each timeframe (2M/4M/6M/1Y),
     and the daily break signal score.
     """
-    symbols = _load_symbols()
+    symbols = _normalize_symbols(_load_symbols())
     if asset_type != "All":
         symbols = [s for s in symbols if s["asset_type"].lower() == asset_type.lower()]
 
     sym_ticker = {
-        s["symbol"]: config.SYMBOL_MAP[s["symbol"]]
+        s["symbol"]: config.SYMBOL_MAP.get(s["symbol"], s["symbol"])
         for s in symbols
-        if s["symbol"] in config.SYMBOL_MAP
     }
     name_map = {s["symbol"]: s["asset_name"] for s in symbols}
     type_map = {s["symbol"]: s["asset_type"]  for s in symbols}

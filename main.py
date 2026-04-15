@@ -71,23 +71,26 @@ def main() -> None:
 
     # ── Load and filter symbols ──
     symbols = load_symbols("symbols.csv")
+    # Derive asset_type from URL path if not already present
+    for s in symbols:
+        if "asset_type" not in s:
+            url = s.get("url", "")
+            parts = url.strip("/").split("/")
+            s["asset_type"] = parts[1].capitalize() if len(parts) > 2 else "Stock"
+        if "asset_name" not in s:
+            s["asset_name"] = s.get("name", "") or s["symbol"]
     if args.type != "all":
         symbols = [s for s in symbols if s["asset_type"].lower() == args.type.lower()]
 
     # ── Build symbol → ticker mapping ──
+    # Use SYMBOL_MAP when available; otherwise assume yfinance ticker == symbol
     sym_ticker: dict[str, str] = {}
-    unmapped: list[str] = []
     for s in symbols:
         sym = s["symbol"]
-        if sym in config.SYMBOL_MAP:
-            sym_ticker[sym] = config.SYMBOL_MAP[sym]
-        else:
-            unmapped.append(sym)
+        sym_ticker[sym] = config.SYMBOL_MAP.get(sym, sym)
 
-    if unmapped:
-        print(f"[!] No yfinance mapping for {len(unmapped)} symbol(s): {', '.join(unmapped)}",
-              file=sys.stderr)
-
+    print(f"[i] {len(sym_ticker)} symbols ({sum(1 for s in sym_ticker if s in config.SYMBOL_MAP)} mapped, "
+          f"{sum(1 for s in sym_ticker if s not in config.SYMBOL_MAP)} auto-derived)")
     print(f"Fetching data for {len(sym_ticker)} symbols "
           f"({args.days} days, cache={'off' if args.no_cache else 'on'}) …")
 
