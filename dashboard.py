@@ -49,18 +49,20 @@ st.markdown("""
     border-radius: 8px;
     padding: 12px 14px;
     margin-bottom: 8px;
-    border-left: 4px solid #555;
-    background: #161b22;
+    border-left: 4px solid #bbb;
+    background: #f8fafc;
     font-family: monospace;
+    color: #1a1a2e;
 }
-.ft-bull { border-left-color: #26a69a; }
-.ft-bear { border-left-color: #ef5350; }
-.ft-sym  { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.03em; }
-.ft-sub  { font-size: 0.78rem; color: #9e9e9e; line-height: 1.7; }
+.ft-bull { border-left-color: #26a69a; background: #f0faf9; }
+.ft-bear { border-left-color: #ef5350; background: #fff5f5; }
+.ft-sym  { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.03em; color: #0d1117; }
+.ft-sub  { font-size: 0.78rem; color: #4a5568; line-height: 1.7; }
 .ft-score-badge {
     float: right;
     font-size: 0.8rem;
-    background: #2a2a2a;
+    background: #e2e8f0;
+    color: #1a1a2e;
     border-radius: 4px;
     padding: 1px 7px;
 }
@@ -990,7 +992,7 @@ def _make_chart(
         ),
         xaxis_rangeslider_visible=False,
         height=540,
-        template="plotly_dark",
+        template="plotly_white",
         margin=dict(l=40, r=180, t=55, b=40),
         legend=dict(orientation="h", y=-0.05),
     )
@@ -1313,7 +1315,7 @@ def main() -> None:
             ))
             fig_bar.update_layout(
                 title="Sector Average 1Y Return %",
-                template="plotly_dark",
+                template="plotly_white",
                 height=360,
                 margin=dict(l=30, r=30, t=50, b=80),
                 yaxis_title="Avg 1Y %",
@@ -1337,7 +1339,7 @@ def main() -> None:
             fig_multi.update_layout(
                 barmode="group",
                 title="Sector Returns by Horizon",
-                template="plotly_dark",
+                template="plotly_white",
                 height=420,
                 margin=dict(l=30, r=30, t=50, b=80),
                 yaxis_title="Avg %",
@@ -1367,7 +1369,7 @@ def main() -> None:
             fig_bull.update_layout(
                 barmode="stack",
                 title="% of Symbols Bullish vs Bearish (1Y)",
-                template="plotly_dark",
+                template="plotly_white",
                 height=360,
                 margin=dict(l=30, r=30, t=50, b=80),
                 yaxis_title="% of Symbols",
@@ -1625,7 +1627,7 @@ def main() -> None:
                     fig_scatter.add_hline(y=0, line_dash="dash", line_color="#666")
                     fig_scatter.update_layout(
                         title="Price vs Analyst Upside%",
-                        template="plotly_dark",
+                        template="plotly_white",
                         height=400,
                         margin=dict(l=30, r=30, t=50, b=40),
                         xaxis_title="Current Price ($)",
@@ -1656,7 +1658,7 @@ def main() -> None:
                     fig_cons.update_layout(
                         barmode="stack",
                         title="Analyst Recommendations per Symbol",
-                        template="plotly_dark",
+                        template="plotly_white",
                         height=400,
                         margin=dict(l=30, r=30, t=50, b=60),
                         yaxis_title="# Analysts",
@@ -1699,7 +1701,7 @@ def main() -> None:
                 ))
                 fig_targets.update_layout(
                     title="Price vs Analyst Price Targets",
-                    template="plotly_dark",
+                    template="plotly_white",
                     height=420,
                     margin=dict(l=30, r=30, t=50, b=60),
                     yaxis_title="Price ($)",
@@ -1730,7 +1732,7 @@ def main() -> None:
                 fig_eps.update_layout(
                     barmode="group",
                     title="Forward EPS Estimates (Analyst Consensus)",
-                    template="plotly_dark",
+                    template="plotly_white",
                     height=380,
                     margin=dict(l=30, r=30, t=50, b=60),
                     yaxis_title="EPS ($)",
