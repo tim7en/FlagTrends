@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
@@ -923,6 +924,17 @@ Also provide:
 
 # ── Chart ─────────────────────────────────────────────────────────────────────
 
+def _rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder RSI for chart overlay."""
+    delta    = close.diff()
+    gain     = delta.clip(lower=0)
+    loss     = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs       = avg_gain / avg_loss.replace(0, float("nan"))
+    return 100 - (100 / (1 + rs))
+
+
 def _make_chart(
     symbol: str,
     rows:   list[dict],
@@ -938,64 +950,228 @@ def _make_chart(
     high_s  = df_plot["High"].squeeze()
     low_s   = df_plot["Low"].squeeze()
     close_s = df_plot["Close"].squeeze()
+    dates   = df_plot.index
 
-    fig = go.Figure()
+    # ── Volume ────────────────────────────────────────────────────────────────
+    has_volume = "Volume" in df_plot.columns and df_plot["Volume"].sum() > 0
+    vol_s      = df_plot["Volume"].squeeze() if has_volume else None
 
-    # Candlesticks
+    # ── RSI ───────────────────────────────────────────────────────────────────
+    # Use full history for RSI warmup, then trim to plot window
+    full_close = df["Close"].squeeze()
+    rsi_full   = _rsi_series(full_close)
+    rsi_s      = rsi_full.reindex(df_plot.index)
+
+    # ── Y-axis range: candle data only ────────────────────────────────────────
+    candle_low  = float(low_s.min())
+    candle_high = float(high_s.max())
+    candle_span = candle_high - candle_low or candle_high * 0.05
+    pad         = candle_span * 0.08
+    y_min       = candle_low  - pad
+    y_max       = candle_high + pad
+
+    # ── Safety lines visible within candle window ─────────────────────────────
+    vis_buffer   = candle_span * 0.15
+    visible_rows = [
+        r for r in sym_rows
+        if r["is_safety_line"] and (y_min - vis_buffer) <= r["level"] <= (y_max + vis_buffer)
+    ]
+
+    # ── subplot layout: price (60%) | volume (18%) | RSI (22%) ───────────────
+    row_heights = [0.65, 0.15, 0.20]
+    subplot_titles = ("", "Volume", "RSI (14)")
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=row_heights,
+        subplot_titles=subplot_titles,
+    )
+
+    # ── Row 1 — Candlesticks ─────────────────────────────────────────────────
     fig.add_trace(go.Candlestick(
-        x=df_plot.index,
+        x=dates,
         open=open_s, high=high_s, low=low_s, close=close_s,
         name=symbol,
-        increasing_line_color="#26a69a",
-        decreasing_line_color="#ef5350",
-        increasing_fillcolor="#26a69a",
-        decreasing_fillcolor="#ef5350",
-    ))
+        increasing_line_color="#1a9688",
+        decreasing_line_color="#e53935",
+        increasing_fillcolor="#1a9688",
+        decreasing_fillcolor="#e53935",
+        whiskerwidth=0.3,
+        showlegend=False,
+    ), row=1, col=1)
 
-    # Safety lines
-    for r in sym_rows:
-        if not r["is_safety_line"]:
-            continue
-        is_sup  = r["level_type"] == "support"
-        color   = "#26a69a" if is_sup else "#ef5350"
-        dash    = "solid"   if r["forming_soon"] else "dot"
-        width   = 2         if r["forming_soon"] else 1
+    # 20 / 50 EMA overlays
+    for span, color, lw in [(20, "#1565c0", 1.2), (50, "#f57c00", 1.4)]:
+        ema = close_s.ewm(span=span, adjust=False).mean()
+        fig.add_trace(go.Scatter(
+            x=dates, y=ema,
+            mode="lines",
+            name=f"EMA{span}",
+            line=dict(color=color, width=lw),
+            hoverinfo="skip",
+        ), row=1, col=1)
 
-        touch_dots = "●" * min(r["touches"], 8)
-        compressed = " 📉" if r["is_compressed"] else ""
-        forming    = " ⚡" if r["forming_soon"]  else ""
-        label = (
-            f"{'SUP' if is_sup else 'RES'}  {r['level']:.4f}  "
-            f"|  {r['touches']}T {touch_dots}  "
-            f"|  score {r['score']}/10"
-            f"{compressed}{forming}"
+    # ── Safety lines on row 1 ─────────────────────────────────────────────────
+    visible_rows_sorted = sorted(visible_rows, key=lambda r: r["level"])
+    last_annotated: float | None = None
+    min_label_gap = candle_span * 0.04
+
+    for r in visible_rows_sorted:
+        is_sup = r["level_type"] == "support"
+        color  = "#1a9688" if is_sup else "#e53935"
+        dash   = "solid"   if r["forming_soon"] else "dash"
+        width  = 2.0       if r["forming_soon"] else 1.0
+        forming = " ⚡" if r["forming_soon"] else ""
+        short_label = (
+            f"{'SUP' if is_sup else 'RES'} {r['level']:.4f}"
+            f"  {r['touches']}T · {r['score']}/10{forming}"
+        )
+        annotate = (
+            last_annotated is None
+            or abs(r["level"] - last_annotated) >= min_label_gap
+        )
+        # Draw line spanning full x range as a Scatter trace instead of add_hline
+        # so it stays confined to row 1
+        fig.add_trace(go.Scatter(
+            x=[dates[0], dates[-1]],
+            y=[r["level"], r["level"]],
+            mode="lines",
+            line=dict(color=color, dash=dash, width=width),
+            name=short_label if annotate else "",
+            showlegend=annotate,
+            hoverinfo="skip",
+            legendgroup="levels",
+        ), row=1, col=1)
+        if annotate:
+            # Right-side annotation via invisible scatter point
+            fig.add_annotation(
+                x=dates[-1], y=r["level"],
+                text=short_label,
+                showarrow=False,
+                xanchor="left",
+                xref="x", yref="y",
+                font=dict(color=color, size=9),
+                bgcolor="rgba(255,255,255,0.8)",
+                borderpad=2,
+                row=1, col=1,
+            )
+            last_annotated = r["level"]
+
+    # ── Row 2 — Volume bars ───────────────────────────────────────────────────
+    if has_volume and vol_s is not None:
+        vol_colors = [
+            "#1a9688" if float(c) >= float(o) else "#e53935"
+            for c, o in zip(close_s, open_s)
+        ]
+        # 20-bar volume MA
+        vol_ma = vol_s.rolling(20).mean()
+        fig.add_trace(go.Bar(
+            x=dates, y=vol_s,
+            name="Volume",
+            marker_color=vol_colors,
+            marker_opacity=0.7,
+            showlegend=False,
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=dates, y=vol_ma,
+            mode="lines",
+            name="Vol MA20",
+            line=dict(color="#7b1fa2", width=1.2, dash="dot"),
+            showlegend=False,
+            hoverinfo="skip",
+        ), row=2, col=1)
+    else:
+        fig.add_annotation(
+            text="Volume data unavailable",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(color="#aaa", size=11),
+            row=2, col=1,
         )
 
+    # ── Row 3 — RSI ───────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=dates, y=rsi_s,
+        mode="lines",
+        name="RSI 14",
+        line=dict(color="#5c6bc0", width=1.6),
+        showlegend=False,
+    ), row=3, col=1)
+
+    # Overbought / oversold bands
+    for level, clr, label in [(70, "#e53935", "OB 70"), (30, "#1a9688", "OS 30"), (50, "#9e9e9e", "")]:
         fig.add_hline(
-            y=r["level"],
-            line_color=color,
-            line_dash=dash,
-            line_width=width,
+            y=level, row=3, col=1,
+            line_color=clr,
+            line_dash="dot" if level == 50 else "dash",
+            line_width=1,
             annotation_text=label,
             annotation_position="right",
-            annotation_font_color=color,
-            annotation_font_size=10,
+            annotation_font_color=clr,
+            annotation_font_size=9,
         )
+    # RSI fill: colour the area above 70 red, below 30 green
+    rsi_arr = rsi_s.fillna(50)
+    fig.add_trace(go.Scatter(
+        x=dates, y=rsi_arr.clip(upper=70),
+        fill=None, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=dates, y=rsi_arr,
+        fill="tonexty",
+        fillcolor="rgba(229,57,53,0.15)",
+        mode="none", showlegend=False, hoverinfo="skip",
+        name="OB fill",
+    ), row=3, col=1)
 
-    meta     = sym_rows[0]
+    # ── Layout ────────────────────────────────────────────────────────────────
+    meta = sym_rows[0]
+    compressed_tag = "  📉 COMPRESSED" if meta["atr_ratio"] < COMPRESSION_RATIO else ""
+    grid = dict(showgrid=True, gridcolor="#ebebeb", gridwidth=1)
+
     fig.update_layout(
-        title=(
-            f"<b>{symbol}</b>  —  {meta['name']}  "
-            f"|  Price: {meta['price']}  "
-            f"|  ATR ratio: {meta['atr_ratio']:.2f}"
-            f"{'  📉 COMPRESSED' if meta['atr_ratio'] < COMPRESSION_RATIO else ''}"
+        title=dict(
+            text=(
+                f"<b>{symbol}</b>  —  {meta['name']}"
+                f"  |  Price: <b>{meta['price']}</b>"
+                f"  |  ATR ratio: {meta['atr_ratio']:.2f}{compressed_tag}"
+            ),
+            font=dict(size=14),
+            x=0.0, xanchor="left",
         ),
-        xaxis_rangeslider_visible=False,
-        height=540,
+        height=960,
         template="plotly_white",
-        margin=dict(l=40, r=180, t=55, b=40),
-        legend=dict(orientation="h", y=-0.05),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#fafafa",
+        margin=dict(l=60, r=170, t=60, b=40),
+        legend=dict(
+            orientation="h", y=1.02, x=0.0,
+            font=dict(size=10),
+            bgcolor="rgba(255,255,255,0.8)",
+        ),
+        hovermode="x unified",
+        bargap=0.15,
     )
+
+    # Per-axis formatting
+    fig.update_xaxes(showgrid=True, gridcolor="#ebebeb", tickfont=dict(size=10))
+    fig.update_yaxes(**grid, tickfont=dict(size=10))
+
+    # Price axis — pin to candle range
+    fig.update_yaxes(range=[y_min, y_max], autorange=False, row=1, col=1)
+    # Volume axis — no negative values
+    fig.update_yaxes(rangemode="nonnegative", tickformat=".2s", row=2, col=1)
+    # RSI axis — fixed 0-100
+    fig.update_yaxes(range=[0, 100], dtick=20, row=3, col=1)
+    # Only show x-axis tick labels on bottom panel
+    fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_xaxes(showticklabels=False, row=2, col=1)
+    fig.update_xaxes(showticklabels=True,  row=3, col=1)
+
+    # Remove rangeslider
+    fig.update_xaxes(rangeslider_visible=False)
+
     return fig
 
 
