@@ -9,11 +9,13 @@ from __future__ import annotations
 import csv
 import datetime
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -193,11 +195,13 @@ def _run_trend_scan(asset_type: str) -> list[dict]:
             "symbol":            ts.symbol,
             "name":              ts.asset_name,
             "asset_type":        ts.asset_type,
+            "sector":            config.SECTOR_MAP.get(ts.symbol, "Other"),
             "price":             ts.price,
             "week52_high":       ts.week52_high,
             "week52_low":        ts.week52_low,
             "pct_from_52w_high": ts.pct_from_52w_high,
             "pct_from_52w_low":  ts.pct_from_52w_low,
+            "ytd_chg":           ts.ytd_change_pct,
             "daily_score":       ts.score,
             "daily_direction":   ts.direction,
             "rsi":               ts.rsi,
@@ -208,6 +212,144 @@ def _run_trend_scan(asset_type: str) -> list[dict]:
             row[f"tf_{label}_dir"] = tf.direction    if tf else "N/A"
             row[f"tf_{label}_chg"] = tf.change_pct   if tf else 0.0
         rows.append(row)
+
+    return rows
+
+
+@st.cache_data(ttl=3600, show_spinner="Fetching earnings & analyst estimates…")
+def _run_earnings_scan(asset_type: str) -> list[dict]:
+    """
+    Returns a flat list of dicts — one row per symbol — containing analyst
+    price targets, recommendation summary, upcoming earnings date, and EPS
+    estimates as reported by yfinance.  Only symbols with at least one data
+    point are included.
+    """
+    symbols = _normalize_symbols(_load_symbols())
+    if asset_type != "All":
+        symbols = [s for s in symbols if s["asset_type"].lower() == asset_type.lower()]
+
+    sym_ticker = {
+        s["symbol"]: config.SYMBOL_MAP.get(s["symbol"], s["symbol"])
+        for s in symbols
+    }
+    name_map = {s["symbol"]: s.get("asset_name", s["symbol"]) for s in symbols}
+
+    def _fetch_one(sym: str) -> dict | None:
+        ticker_str = sym_ticker[sym]
+        try:
+            t = yf.Ticker(ticker_str)
+
+            # ── current price ───────────────────────────────────────────────
+            current_price: float | None = None
+            try:
+                fi = t.fast_info
+                current_price = float(fi.last_price)
+            except Exception:
+                pass
+
+            # ── analyst price targets ───────────────────────────────────────
+            mean_target = low_target = high_target = num_analysts = None
+            try:
+                pt = t.analyst_price_targets
+                if pt is not None:
+                    if hasattr(pt, "get"):           # dict-like
+                        mean_target  = pt.get("mean")
+                        low_target   = pt.get("low")
+                        high_target  = pt.get("high")
+                        num_analysts = pt.get("numberOfAnalysts")
+                    elif hasattr(pt, "__iter__"):    # Series / mapping
+                        d = dict(pt)
+                        mean_target  = d.get("mean")
+                        low_target   = d.get("low")
+                        high_target  = d.get("high")
+                        num_analysts = d.get("numberOfAnalysts")
+                # coerce to Python floats
+                mean_target  = float(mean_target)  if mean_target  is not None else None
+                low_target   = float(low_target)   if low_target   is not None else None
+                high_target  = float(high_target)  if high_target  is not None else None
+                num_analysts = int(num_analysts)   if num_analysts is not None else None
+            except Exception:
+                mean_target = low_target = high_target = num_analysts = None
+
+            # ── upside to mean target ───────────────────────────────────────
+            upside_pct: float | None = None
+            if mean_target and current_price and current_price > 0:
+                upside_pct = round((mean_target - current_price) / current_price * 100, 2)
+
+            # ── analyst recommendations summary ─────────────────────────────
+            strong_buy = buy = hold = sell = strong_sell = None
+            try:
+                rec = t.recommendations
+                if rec is not None and not rec.empty:
+                    row0 = rec.iloc[0]
+                    strong_buy  = int(row0.get("strongBuy",  row0.get("Strong Buy",  0)))
+                    buy         = int(row0.get("buy",        row0.get("Buy",         0)))
+                    hold        = int(row0.get("hold",       row0.get("Hold",        0)))
+                    sell        = int(row0.get("sell",       row0.get("Sell",        0)))
+                    strong_sell = int(row0.get("strongSell", row0.get("Strong Sell", 0)))
+            except Exception:
+                strong_buy = buy = hold = sell = strong_sell = None
+
+            # ── next earnings date ──────────────────────────────────────────
+            next_earnings: datetime.date | None = None
+            try:
+                ed = t.earnings_dates
+                if ed is not None and not ed.empty:
+                    tz = ed.index.tz
+                    today_ts = pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
+                    future = ed[ed.index > today_ts]
+                    if not future.empty:
+                        next_earnings = future.index.min().date()
+            except Exception:
+                pass
+
+            # ── EPS & revenue estimates ─────────────────────────────────────
+            eps_curr_yr = eps_next_yr = None
+            try:
+                ee = t.earnings_estimate
+                if ee is not None and not ee.empty and "avg" in ee.columns:
+                    if "0y" in ee.index:
+                        v = ee.loc["0y", "avg"]
+                        eps_curr_yr = float(v) if pd.notna(v) else None
+                    if "+1y" in ee.index:
+                        v = ee.loc["+1y", "avg"]
+                        eps_next_yr = float(v) if pd.notna(v) else None
+            except Exception:
+                pass
+
+            # skip symbols with no useful data at all
+            if all(v is None for v in [mean_target, strong_buy, next_earnings]):
+                return None
+
+            return {
+                "symbol":       sym,
+                "name":         name_map.get(sym, sym),
+                "sector":       config.SECTOR_MAP.get(sym, "Other"),
+                "price":        current_price,
+                "mean_target":  mean_target,
+                "low_target":   low_target,
+                "high_target":  high_target,
+                "num_analysts": num_analysts,
+                "upside_pct":   upside_pct,
+                "strong_buy":   strong_buy,
+                "buy":          buy,
+                "hold":         hold,
+                "sell":         sell,
+                "strong_sell":  strong_sell,
+                "next_earnings": next_earnings,
+                "eps_curr_yr":  eps_curr_yr,
+                "eps_next_yr":  eps_next_yr,
+            }
+        except Exception:
+            return None
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=config.FETCH_WORKERS) as ex:
+        futures = {ex.submit(_fetch_one, sym): sym for sym in sym_ticker}
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result is not None:
+                rows.append(result)
 
     return rows
 
@@ -263,17 +405,8 @@ def _build_table(
 
 
 def _style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
-    def row_color(row: pd.Series) -> list[str]:
-        if row["Forming"] == "⚡":
-            if "BULLISH" in str(row.get("Direction", "")):
-                return ["background-color: #0c2216"] * len(row)
-            if "BEARISH" in str(row.get("Direction", "")):
-                return ["background-color: #220c0c"] * len(row)
-        return [""] * len(row)
-
     return (
         df.style
-        .apply(row_color, axis=1)
         .format({
             "% Away":    "{:+.2f}%",
             "ATR Ratio": "{:.2f}",
@@ -305,8 +438,10 @@ def _build_trend_table(scan_rows: list[dict]) -> pd.DataFrame:
         records.append({
             "Symbol":        r["symbol"],
             "Name":          r["name"][:22],
+            "Sector":        r.get("sector", "Other"),
             "Type":          r["asset_type"],
             "Price":         r["price"],
+            "YTD%":          r.get("ytd_chg"),
             "2M Trend":      _DIR_EMOJI.get(r["tf_2M_dir"], r["tf_2M_dir"]),
             "2M Chg%":       r["tf_2M_chg"],
             "4M Trend":      _DIR_EMOJI.get(r["tf_4M_dir"], r["tf_4M_dir"]),
@@ -328,39 +463,212 @@ def _build_trend_table(scan_rows: list[dict]) -> pd.DataFrame:
     return df
 
 
+def _build_sector_table(scan_rows: list[dict]) -> pd.DataFrame:
+    """Aggregate sector statistics across all timeframes + YTD."""
+    if not scan_rows:
+        return pd.DataFrame()
+
+    rows_with_sector = [r for r in scan_rows if r.get("sector")]
+    if not rows_with_sector:
+        return pd.DataFrame()
+
+    import statistics
+
+    def _safe_mean(vals: list) -> float | None:
+        clean = [v for v in vals if v is not None]
+        return round(statistics.mean(clean), 2) if clean else None
+
+    def _bull_pct(dirs: list[str]) -> float:
+        if not dirs:
+            return 0.0
+        return round(sum(1 for d in dirs if d == "BULLISH") / len(dirs) * 100, 1)
+
+    def _bear_pct(dirs: list[str]) -> float:
+        if not dirs:
+            return 0.0
+        return round(sum(1 for d in dirs if d == "BEARISH") / len(dirs) * 100, 1)
+
+    sectors: dict[str, list[dict]] = {}
+    for r in rows_with_sector:
+        s = r["sector"]
+        sectors.setdefault(s, []).append(r)
+
+    records = []
+    for sector, items in sorted(sectors.items()):
+        n = len(items)
+        records.append({
+            "Sector":         sector,
+            "# Symbols":      n,
+            "Avg YTD%":       _safe_mean([r.get("ytd_chg") for r in items]),
+            "Avg 2M%":        _safe_mean([r.get("tf_2M_chg") for r in items]),
+            "Avg 4M%":        _safe_mean([r.get("tf_4M_chg") for r in items]),
+            "Avg 6M%":        _safe_mean([r.get("tf_6M_chg") for r in items]),
+            "Avg 1Y%":        _safe_mean([r.get("tf_1Y_chg") for r in items]),
+            "1Y Bull%":       _bull_pct([r.get("tf_1Y_dir", "") for r in items]),
+            "1Y Bear%":       _bear_pct([r.get("tf_1Y_dir", "") for r in items]),
+            "Avg RSI":        _safe_mean([r.get("rsi") for r in items]),
+            "Avg Score":      _safe_mean([r.get("daily_score") for r in items]),
+            "Near 52W High":  sum(1 for r in items
+                                  if r.get("pct_from_52w_high") is not None
+                                  and r["pct_from_52w_high"] >= -5),
+            "Near 52W Low":   sum(1 for r in items
+                                  if r.get("pct_from_52w_low") is not None
+                                  and r["pct_from_52w_low"] <= 5),
+        })
+
+    df = pd.DataFrame(records)
+    df = df.sort_values("Avg 1Y%", ascending=False)
+    return df
+
+
+def _style_sector_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def chg_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        if val > 0:
+            return "color: #1a7f3c"
+        if val < 0:
+            return "color: #c0392b"
+        return ""
+
+    chg_cols = ["Avg YTD%", "Avg 2M%", "Avg 4M%", "Avg 6M%", "Avg 1Y%"]
+    fmt: dict = {c: "{:+.2f}%" for c in chg_cols}
+    fmt["1Y Bull%"] = "{:.1f}%"
+    fmt["1Y Bear%"] = "{:.1f}%"
+    fmt["Avg RSI"]  = "{:.1f}"
+    fmt["Avg Score"] = "{:+.2f}"
+    return df.style.map(chg_color, subset=chg_cols).format(fmt, na_rep="—")
+
+
 def _style_trend_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     def cell_color(val: str) -> str:
         if isinstance(val, str):
             if "Bull" in val:
-                return "color: #26a69a"
+                return "color: #1a7f3c; font-weight: bold"
             if "Bear" in val:
-                return "color: #ef5350"
+                return "color: #c0392b; font-weight: bold"
         return ""
 
     def chg_color(val: float) -> str:
         if isinstance(val, (int, float)):
-            if val > 2:
-                return "color: #26a69a"
-            if val < -2:
-                return "color: #ef5350"
-        return "color: #9e9e9e"
+            if val > 0:
+                return "color: #1a7f3c"
+            if val < 0:
+                return "color: #c0392b"
+        return ""
 
-    return (
-        df.style
-        .applymap(cell_color, subset=["2M Trend", "4M Trend", "6M Trend", "1Y Trend", "Daily Signal"])
-        .applymap(chg_color,  subset=["2M Chg%", "4M Chg%", "6M Chg%", "1Y Chg%"])
-        .format({
-            "Price":         "{:.4f}",
-            "2M Chg%":       "{:+.2f}%",
-            "4M Chg%":       "{:+.2f}%",
-            "6M Chg%":       "{:+.2f}%",
-            "1Y Chg%":       "{:+.2f}%",
-            "52W High":      "{:.4f}",
-            "52W Low":       "{:.4f}",
-            "% vs 52W High": "{:+.2f}%",
-            "% vs 52W Low":  "{:+.2f}%",
-        }, na_rep="—")
-    )
+    cols = set(df.columns)
+    trend_cols = [c for c in ["2M Trend", "4M Trend", "6M Trend", "1Y Trend", "Daily Signal"] if c in cols]
+    chg_cols   = [c for c in ["2M Chg%", "4M Chg%", "6M Chg%", "1Y Chg%", "YTD%"] if c in cols]
+    fmt_all = {
+        "Price":         "{:.4f}",
+        "YTD%":          "{:+.2f}%",
+        "2M Chg%":       "{:+.2f}%",
+        "4M Chg%":       "{:+.2f}%",
+        "6M Chg%":       "{:+.2f}%",
+        "1Y Chg%":       "{:+.2f}%",
+        "52W High":      "{:.4f}",
+        "52W Low":       "{:.4f}",
+        "% vs 52W High": "{:+.2f}%",
+        "% vs 52W Low":  "{:+.2f}%",
+    }
+    fmt = {k: v for k, v in fmt_all.items() if k in cols}
+
+    styler = df.style
+    if trend_cols:
+        styler = styler.map(cell_color, subset=trend_cols)
+    if chg_cols:
+        styler = styler.map(chg_color, subset=chg_cols)
+    return styler.format(fmt, na_rep="—")
+
+
+# ── Earnings table helpers ────────────────────────────────────────────────────
+
+def _consensus_label(row: dict) -> str:
+    sb = row.get("strong_buy")  or 0
+    b  = row.get("buy")         or 0
+    h  = row.get("hold")        or 0
+    s  = row.get("sell")        or 0
+    ss = row.get("strong_sell") or 0
+    total = sb + b + h + s + ss
+    if total == 0:
+        return "—"
+    bull = sb + b
+    bear = s + ss
+    if bull / total > 0.60:
+        return "Strong Buy" if sb >= b else "Buy"
+    elif bear / total > 0.40:
+        return "Sell" if ss >= s else "Weak Sell"
+    else:
+        return "Hold"
+
+
+def _build_earnings_table(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for r in rows:
+        records.append({
+            "Symbol":        r["symbol"],
+            "Name":          r["name"][:22],
+            "Sector":        r.get("sector", "Other"),
+            "Price":         r.get("price"),
+            "Mean Target":   r.get("mean_target"),
+            "Low Target":    r.get("low_target"),
+            "High Target":   r.get("high_target"),
+            "Upside%":       r.get("upside_pct"),
+            "# Analysts":    r.get("num_analysts"),
+            "Strong Buy":    r.get("strong_buy"),
+            "Buy":           r.get("buy"),
+            "Hold":          r.get("hold"),
+            "Sell":          r.get("sell"),
+            "Strong Sell":   r.get("strong_sell"),
+            "Consensus":     _consensus_label(r),
+            "Next Earnings": r.get("next_earnings"),
+            "EPS Curr Yr":   r.get("eps_curr_yr"),
+            "EPS Next Yr":   r.get("eps_next_yr"),
+        })
+    df = pd.DataFrame(records)
+    df = df.sort_values("Upside%", ascending=False, na_position="last")
+    return df
+
+
+def _style_earnings_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def upside_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        if val > 10:
+            return "color: #1a7f3c; font-weight: bold"
+        if val > 0:
+            return "color: #1a7f3c"
+        if val < 0:
+            return "color: #c0392b"
+        return ""
+
+    def consensus_color(val: str) -> str:
+        if not isinstance(val, str):
+            return ""
+        v = val.lower()
+        if "strong buy" in v or v == "buy":
+            return "color: #1a7f3c; font-weight: bold"
+        if "sell" in v:
+            return "color: #c0392b; font-weight: bold"
+        return ""
+
+    cols = set(df.columns)
+    fmt: dict = {}
+    if "Price"       in cols: fmt["Price"]       = "{:.2f}"
+    if "Mean Target" in cols: fmt["Mean Target"] = "{:.2f}"
+    if "Low Target"  in cols: fmt["Low Target"]  = "{:.2f}"
+    if "High Target" in cols: fmt["High Target"] = "{:.2f}"
+    if "Upside%"     in cols: fmt["Upside%"]     = "{:+.2f}%"
+    if "EPS Curr Yr" in cols: fmt["EPS Curr Yr"] = "{:.2f}"
+    if "EPS Next Yr" in cols: fmt["EPS Next Yr"] = "{:.2f}"
+
+    styler = df.style.format(fmt, na_rep="—")
+    if "Upside%"   in cols: styler = styler.map(upside_color,    subset=["Upside%"])
+    if "Consensus" in cols: styler = styler.map(consensus_color, subset=["Consensus"])
+    return styler
 
 
 # ── Chart ─────────────────────────────────────────────────────────────────────
@@ -502,7 +810,9 @@ def main() -> None:
         )
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab_levels, tab_trends = st.tabs(["🏛️ Key Levels", "📅 Multi-Timeframe Trends"])
+    tab_levels, tab_trends, tab_sectors, tab_earnings = st.tabs([
+        "🏛️ Key Levels", "📅 Multi-Timeframe Trends", "🗂️ Sector Analysis", "💰 Earnings & Estimates"
+    ])
 
     # ════════════════════════════════════════════════════════════════════════
     # TAB 1 — Key Levels (existing view)
@@ -685,6 +995,315 @@ def main() -> None:
                     }),
                     use_container_width=True, height=360,
                 )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 3 — Sector Analysis
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_sectors:
+        st.subheader("🗂️ Sector Analysis — Aggregate Returns & Trends")
+        st.caption(
+            "Sector averages are computed across all symbols in each sector that have "
+            "sufficient data. YTD = price change since Jan 1 of the current year."
+        )
+
+        scan_rows_s = _run_trend_scan(asset_type)
+
+        # ── Sector aggregate table ────────────────────────────────────────────
+        sector_df = _build_sector_table(scan_rows_s)
+
+        if not sector_df.empty:
+            # Top-level sector performance bar chart (1Y avg %)
+            fig_bar = go.Figure()
+            colors = [
+                "#26a69a" if v >= 0 else "#ef5350"
+                for v in sector_df["Avg 1Y%"].fillna(0)
+            ]
+            fig_bar.add_trace(go.Bar(
+                x=sector_df["Sector"],
+                y=sector_df["Avg 1Y%"],
+                marker_color=colors,
+                name="Avg 1Y Return %",
+                text=[f"{v:+.1f}%" if v is not None else "—"
+                      for v in sector_df["Avg 1Y%"]],
+                textposition="outside",
+            ))
+            fig_bar.update_layout(
+                title="Sector Average 1Y Return %",
+                template="plotly_dark",
+                height=360,
+                margin=dict(l=30, r=30, t=50, b=80),
+                yaxis_title="Avg 1Y %",
+                xaxis_tickangle=-35,
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+            # Multi-period grouped bar chart
+            periods = ["Avg YTD%", "Avg 2M%", "Avg 4M%", "Avg 6M%", "Avg 1Y%"]
+            period_labels = ["YTD", "2M", "4M", "6M", "1Y"]
+            palette = ["#90caf9", "#80cbc4", "#a5d6a7", "#fff176", "#ef9a9a"]
+
+            fig_multi = go.Figure()
+            for col, label, color in zip(periods, period_labels, palette):
+                fig_multi.add_trace(go.Bar(
+                    name=label,
+                    x=sector_df["Sector"],
+                    y=sector_df[col].fillna(0),
+                    marker_color=color,
+                ))
+            fig_multi.update_layout(
+                barmode="group",
+                title="Sector Returns by Horizon",
+                template="plotly_dark",
+                height=420,
+                margin=dict(l=30, r=30, t=50, b=80),
+                yaxis_title="Avg %",
+                xaxis_tickangle=-35,
+                legend=dict(orientation="h", y=1.07),
+            )
+            st.plotly_chart(fig_multi, use_container_width=True)
+
+            # Bull vs Bear % stacked bar
+            fig_bull = go.Figure()
+            fig_bull.add_trace(go.Bar(
+                name="🟢 Bullish 1Y%",
+                x=sector_df["Sector"],
+                y=sector_df["1Y Bull%"],
+                marker_color="#26a69a",
+                text=[f"{v:.0f}%" for v in sector_df["1Y Bull%"]],
+                textposition="inside",
+            ))
+            fig_bull.add_trace(go.Bar(
+                name="🔴 Bearish 1Y%",
+                x=sector_df["Sector"],
+                y=sector_df["1Y Bear%"],
+                marker_color="#ef5350",
+                text=[f"{v:.0f}%" for v in sector_df["1Y Bear%"]],
+                textposition="inside",
+            ))
+            fig_bull.update_layout(
+                barmode="stack",
+                title="% of Symbols Bullish vs Bearish (1Y)",
+                template="plotly_dark",
+                height=360,
+                margin=dict(l=30, r=30, t=50, b=80),
+                yaxis_title="% of Symbols",
+                xaxis_tickangle=-35,
+                legend=dict(orientation="h", y=1.07),
+            )
+            st.plotly_chart(fig_bull, use_container_width=True)
+
+            st.divider()
+            st.subheader("📋 Sector Summary Table")
+            st.dataframe(
+                _style_sector_table(sector_df),
+                use_container_width=True,
+                height=460,
+            )
+            st.caption(f"{len(sector_df)} sectors  |  sorted by Avg 1Y %")
+
+            # ── Drill-down: symbols within a sector ───────────────────────────
+            st.divider()
+            st.subheader("🔍 Sector Drill-Down — Symbol Returns")
+            sectors_available = sorted(sector_df["Sector"].tolist())
+            chosen_sector = st.selectbox("Choose a sector", sectors_available, key="sector_drill")
+
+            drill_rows = [r for r in scan_rows_s if r.get("sector") == chosen_sector]
+            drill_df   = _build_trend_table(drill_rows)
+
+            if not drill_df.empty:
+                display_cols = [
+                    "Symbol", "Name", "Price",
+                    "YTD%", "2M Chg%", "4M Chg%", "6M Chg%", "1Y Chg%",
+                    "Daily Signal", "Score", "RSI",
+                ]
+                st.dataframe(
+                    _style_trend_table(drill_df[display_cols]),
+                    use_container_width=True,
+                    height=460,
+                )
+                st.caption(f"{len(drill_df)} symbols in {chosen_sector}  |  sorted by 1Y % Change")
+        else:
+            st.info("No sector data available. Run a scan first.")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 4 — Earnings & Analyst Estimates
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_earnings:
+        st.subheader("💰 Earnings & Analyst Estimates")
+        st.caption(
+            "Analyst price targets, recommendation consensus, forward EPS estimates, "
+            "and upcoming earnings dates sourced from yfinance.  "
+            "Data is cached for 1 hour.  Only symbols with at least one data point are shown."
+        )
+
+        er_rows = _run_earnings_scan(asset_type)
+
+        if not er_rows:
+            st.info("No analyst/earnings data found for the current symbol set.")
+        else:
+            today = datetime.date.today()
+
+            # ── Summary metrics ───────────────────────────────────────────────
+            with_target   = [r for r in er_rows if r.get("mean_target") is not None]
+            upsides       = [r["upside_pct"] for r in with_target if r.get("upside_pct") is not None]
+            avg_upside    = round(sum(upsides) / len(upsides), 1) if upsides else 0.0
+            upcoming_7d   = sum(1 for r in er_rows
+                                if r.get("next_earnings") and
+                                0 <= (r["next_earnings"] - today).days <= 7)
+            upcoming_30d  = sum(1 for r in er_rows
+                                if r.get("next_earnings") and
+                                0 <= (r["next_earnings"] - today).days <= 30)
+            strong_buy_ct = sum(1 for r in er_rows if _consensus_label(r) in ("Strong Buy", "Buy"))
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Symbols w/ Price Target", len(with_target))
+            m2.metric("Avg Analyst Upside",      f"{avg_upside:+.1f}%")
+            m3.metric("⏰ Earnings Next 7 Days",  upcoming_7d)
+            m4.metric("📅 Earnings Next 30 Days", upcoming_30d)
+
+            st.divider()
+
+            # ── Charts ────────────────────────────────────────────────────────
+            col_a, col_b = st.columns(2)
+
+            # Chart 1: Average analyst upside by sector
+            with col_a:
+                sector_upside: dict[str, list[float]] = {}
+                for r in with_target:
+                    if r.get("upside_pct") is not None:
+                        sector_upside.setdefault(r.get("sector", "Other"), []).append(r["upside_pct"])
+
+                if sector_upside:
+                    s_labels = sorted(sector_upside)
+                    s_values = [round(sum(sector_upside[s]) / len(sector_upside[s]), 1) for s in s_labels]
+                    s_colors = ["#26a69a" if v >= 0 else "#ef5350" for v in s_values]
+                    fig_upside = go.Figure(go.Bar(
+                        x=s_labels, y=s_values,
+                        marker_color=s_colors,
+                        text=[f"{v:+.1f}%" for v in s_values],
+                        textposition="outside",
+                    ))
+                    fig_upside.update_layout(
+                        title="Avg Analyst Upside% by Sector",
+                        template="plotly_dark",
+                        height=360,
+                        margin=dict(l=30, r=30, t=50, b=90),
+                        yaxis_title="Avg Upside %",
+                        xaxis_tickangle=-40,
+                    )
+                    st.plotly_chart(fig_upside, use_container_width=True)
+
+            # Chart 2: Analyst consensus breakdown by sector
+            with col_b:
+                sector_consensus: dict[str, dict[str, int]] = {}
+                for r in er_rows:
+                    sec = r.get("sector", "Other")
+                    d   = sector_consensus.setdefault(sec, {"Buy": 0, "Hold": 0, "Sell": 0})
+                    lbl = _consensus_label(r)
+                    if "Buy" in lbl:
+                        d["Buy"] += 1
+                    elif "Sell" in lbl:
+                        d["Sell"] += 1
+                    else:
+                        d["Hold"] += 1
+
+                if sector_consensus:
+                    secs = sorted(sector_consensus)
+                    fig_cons = go.Figure()
+                    for sentiment, color in [("Buy", "#26a69a"), ("Hold", "#90a4ae"), ("Sell", "#ef5350")]:
+                        fig_cons.add_trace(go.Bar(
+                            name=sentiment,
+                            x=secs,
+                            y=[sector_consensus[s].get(sentiment, 0) for s in secs],
+                            marker_color=color,
+                        ))
+                    fig_cons.update_layout(
+                        barmode="stack",
+                        title="Analyst Consensus by Sector",
+                        template="plotly_dark",
+                        height=360,
+                        margin=dict(l=30, r=30, t=50, b=90),
+                        yaxis_title="# Symbols",
+                        xaxis_tickangle=-40,
+                        legend=dict(orientation="h", y=1.08),
+                    )
+                    st.plotly_chart(fig_cons, use_container_width=True)
+
+            # ── Top upside opportunities ──────────────────────────────────────
+            st.divider()
+            st.subheader("🎯 Highest Analyst Upside  (top 20)")
+            top_upside = sorted(with_target,
+                                key=lambda r: r.get("upside_pct") or -999,
+                                reverse=True)[:20]
+            top_df = _build_earnings_table(top_upside)
+            if not top_df.empty:
+                display_cols = [c for c in [
+                    "Symbol", "Name", "Sector", "Price",
+                    "Mean Target", "Low Target", "High Target",
+                    "Upside%", "# Analysts", "Consensus",
+                ] if c in top_df.columns]
+                st.dataframe(
+                    _style_earnings_table(top_df[display_cols]),
+                    use_container_width=True,
+                    height=460,
+                )
+
+            # ── Upcoming earnings calendar ────────────────────────────────────
+            st.divider()
+            st.subheader("📅 Upcoming Earnings  (next 30 days)")
+            calendar_rows = sorted(
+                [r for r in er_rows
+                 if r.get("next_earnings") and
+                 0 <= (r["next_earnings"] - today).days <= 30],
+                key=lambda r: r["next_earnings"],
+            )
+            if calendar_rows:
+                cal_df = _build_earnings_table(calendar_rows)
+                cal_cols = [c for c in [
+                    "Symbol", "Name", "Sector", "Price",
+                    "Next Earnings", "Mean Target", "Upside%",
+                    "Consensus", "# Analysts",
+                    "EPS Curr Yr", "EPS Next Yr",
+                ] if c in cal_df.columns]
+                st.dataframe(
+                    _style_earnings_table(cal_df[cal_cols]),
+                    use_container_width=True,
+                    height=420,
+                )
+                st.caption(f"{len(calendar_rows)} earnings events in the next 30 days")
+            else:
+                st.info("No earnings events found in the next 30 days.")
+
+            # ── Full analyst table ────────────────────────────────────────────
+            st.divider()
+            st.subheader("📋 Full Earnings & Analyst Table")
+
+            # Per-sector filter
+            ea_sectors = sorted({r.get("sector", "Other") for r in er_rows})
+            ef1, ef2 = st.columns([2, 4])
+            ea_sector_filter = ef1.selectbox(
+                "Filter by Sector", ["All"] + ea_sectors, key="ea_sector_filter"
+            )
+            ea_search = ef2.text_input("Search symbol / name", key="ea_search")
+
+            filtered_er = er_rows
+            if ea_sector_filter != "All":
+                filtered_er = [r for r in filtered_er if r.get("sector") == ea_sector_filter]
+            if ea_search:
+                q = ea_search.upper()
+                filtered_er = [r for r in filtered_er
+                               if q in r["symbol"].upper() or q in r["name"].upper()]
+
+            full_df = _build_earnings_table(filtered_er)
+            if not full_df.empty:
+                st.dataframe(
+                    _style_earnings_table(full_df),
+                    use_container_width=True,
+                    height=540,
+                )
+                st.caption(f"{len(full_df)} symbols  |  sorted by Analyst Upside%")
+            else:
+                st.info("No symbols match the current filters.")
 
 
 if __name__ == "__main__":

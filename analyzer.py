@@ -65,6 +65,7 @@ class TrendSignal:
     week52_low:        float | None = None
     pct_from_52w_high: float | None = None  # ≤0: how far below the high
     pct_from_52w_low:  float | None = None  # ≥0: how far above the low
+    ytd_change_pct:    float | None = None  # % change since Jan 1 of current year
     timeframes:        dict[str, TimeframeTrend] = field(default_factory=dict)
 
 
@@ -257,6 +258,23 @@ def analyze(
     pct_from_high   = round((price_f - week52_high_val) / week52_high_val * 100, 2) if week52_high_val else None
     pct_from_low    = round((price_f - week52_low_val)  / week52_low_val  * 100, 2) if week52_low_val  else None
 
+    # ── YTD return ──
+    import datetime as _dt
+    ytd_chg: float | None = None
+    if close.index.dtype.kind == 'M':
+        try:
+            jan1 = pd.Timestamp(_dt.date.today().year, 1, 1)
+            # Match timezone of the index to avoid tz-naive vs tz-aware comparison
+            if close.index.tz is not None:
+                jan1 = jan1.tz_localize(close.index.tz)
+            ytd_slice = close[close.index >= jan1]
+            if len(ytd_slice) >= 2:
+                ytd_start = float(ytd_slice.iloc[0])
+                if ytd_start:
+                    ytd_chg = round((price_f - ytd_start) / ytd_start * 100, 2)
+        except Exception:
+            pass
+
     # ── Multi-timeframe trends ──
     tf_trends = analyze_timeframes(close)
 
@@ -303,5 +321,6 @@ def analyze(
         week52_low=round(week52_low_val, 4),
         pct_from_52w_high=pct_from_high,
         pct_from_52w_low=pct_from_low,
+        ytd_change_pct=ytd_chg,
         timeframes=tf_trends,
     )
