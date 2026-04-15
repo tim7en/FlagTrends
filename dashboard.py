@@ -757,17 +757,31 @@ def _build_ai_prompt(
         if eps_c and eps_c > 0 and eps_n:
             eps_growth = round((eps_n - eps_c) / abs(eps_c) * 100, 1)
 
+        target_spread_pct: float | None = None
+        if ht and lt and lt > 0:
+            target_spread_pct = round((ht - lt) / lt * 100, 1)
+        spread_flag = ""
+        if target_spread_pct is not None:
+            spread_flag = " ⚠️ HIGH UNCERTAINTY" if target_spread_pct > 40 else (
+                          " ↔ wide" if target_spread_pct > 20 else "")
+
         block = f"""
 ### {sym} — {name}
 **Sector:** {sector}
 **Current Price:** ${_fmt(price)} | **52W Range:** {_fmt(pct_52h, '+.1f', '% vs high')} / {_fmt(pct_52l, '+.1f', '% vs low')}
 
 #### Analyst Estimates & Valuation
+> ⚠️ **Data quality note:** yfinance price targets may be stale (no revision date exposed). Treat
+> Analyst Upside as a *directional ranking signal*, not a precision forecast. Wide target spreads
+> indicate high analyst disagreement. Weight P/E, EPS growth, and PEG ratios more heavily than
+> the mean target. Consensus ratings skew bullish — downgrade lag is common.
+
 | Metric | Value |
 |---|---|
 | Mean Price Target | ${_fmt(mt)} |
 | Low / High Target | ${_fmt(lt)} / ${_fmt(ht)} |
-| Analyst Upside | {_fmt(up, '+.1f', '%')} |
+| Target Spread (High−Low / Low) | {_fmt(target_spread_pct, '.1f', '%') if target_spread_pct is not None else 'N/A'}{spread_flag} |
+| Analyst Upside (directional only) | {_fmt(up, '+.1f', '%')} |
 | # Analysts | {na if na is not None else 'N/A'} |
 | Consensus | {cons} (SB:{sb} B:{b} H:{h} S:{s} SS:{ss}) |
 | EPS Est Current Yr | ${_fmt(eps_c)} |
@@ -819,6 +833,22 @@ You are acting as a senior investment analyst combining two complementary framew
    - Note key support/resistance levels implied by 52W high/low proximity
    - A strong fundamental case loses urgency when price is technically overextended
 
+3. **yfinance Analyst Data — Reliability Caveats**
+   - **Price targets are directional, not precise.** Many targets were set months ago under
+     different market conditions and yfinance does not expose the revision date. Use the
+     *ranking* of upside percentages across symbols rather than treating any individual
+     number as a current analyst view.
+   - **Consensus ratings lag and skew bullish.** Analysts are notoriously slow to downgrade;
+     "Buy" ratings are routinely maintained well into a stock's decline. High bullish-count
+     numbers inflate apparent sentiment — treat them as a floor, not confirmation.
+   - **Target spread = uncertainty proxy.** A wide low/high spread (>20–40%) signals high
+     analyst disagreement. Prefer summarising dispersion over the mean in such cases.
+   - **EPS estimates are more reliable than price targets** because they are updated more
+     frequently around earnings, but they still represent a point-in-time snapshot.
+   - **Weight harder data more heavily:** P/E (implied), EPS growth rate, and PEG ratio
+     should carry more analytical weight than the "Analyst Upside" figure, which inherits
+     all of the staleness and bullish-bias caveats above.
+
 ---
 
 ## Symbol Data (as of {today_str})
@@ -832,10 +862,12 @@ You are acting as a senior investment analyst combining two complementary framew
 For **each symbol above**, please provide a structured analysis section:
 
 ### 1. Valuation Assessment (Graham lens)
-- Estimate intrinsic value range using: (a) P/E normalisation vs sector average, (b) earnings power value (EPV), (c) analyst target as a market-consensus anchor
-- Comment on margin of safety at the current price vs the mean analyst target
-- Is the implied P/E reasonable given the sector and growth rate?
-- Flag any "earnings quality" concerns (e.g. very high P/E with negative EPS growth)
+- Estimate intrinsic value range using: (a) P/E normalisation vs sector average, (b) earnings power value (EPV), (c) analyst target as a *directional* market-consensus anchor — not a precision figure
+- **Lead with P/E and EPS growth rate; use the analyst mean target only to cross-check direction.** A wide Low/High target spread signals low consensus — discount the mean heavily in those cases.
+- Comment on margin of safety at the current price; note that "Analyst Upside" figures may reflect targets set months ago under different market conditions
+- Is the implied P/E reasonable given the sector, growth rate, and PEG? A PEG below 1.0 is a stronger signal than any stale price target.
+- Flag any "earnings quality" concerns (e.g. very high P/E with negative or decelerating EPS growth)
+- Where the target spread exceeds 30%, explicitly state that the high analyst disagreement reduces the reliability of any consensus-based valuation anchor
 
 ### 2. Business & Sector Moat
 - What durable competitive advantages (if any) does this business possess? (pricing power, network effects, switching costs, cost advantages, intangibles)
@@ -849,9 +881,11 @@ For **each symbol above**, please provide a structured analysis section:
 - Does the daily break signal corroborate or conflict with the fundamental thesis?
 
 ### 4. Market Dynamics & Sentiment
-- Summarise analyst consensus sentiment and any notable divergence between low/high targets
+- Summarise analyst consensus sentiment, but note that consensus ratings skew bullish due to well-documented downgrade lag — treat high buy-counts as a weak positive rather than strong confirmation
+- **Focus on target dispersion (Low vs High spread) more than the mean target.** A tight spread across many analysts signals genuine conviction; a wide spread signals uncertainty that the mean number obscures.
+- EPS estimates are the most timely and reliable of the analyst data fields — give them primary weight in catalyst analysis
 - Comment on upcoming earnings as a near-term catalyst or risk event
-- Consider macro backdrop (rates, growth expectations, sector rotation themes)
+- Consider macro backdrop (rates, growth expectations, sector rotation themes) and whether any major macro regime change (e.g. conflict escalation, central bank pivot) may have rendered outstanding price targets stale
 
 ### 5. Investment Rating & Recommendation
 Provide a clear rating from the following scale, with one-paragraph justification:
@@ -880,7 +914,7 @@ Also provide:
 
 ---
 
-*Data sourced from yfinance. Analyst estimates are consensus; individual analyst views vary. This prompt is for research assistance only and does not constitute financial advice.*
+*Data sourced from yfinance as of {today_str}. Analyst price targets aggregate sell-side consensus but may be stale — yfinance does not expose target revision dates. Consensus ratings skew bullish; downgrade lag is common. Use upside % for relative ranking only, not as a precision forecast. For current target revision dates and frequency, cross-reference Bloomberg, FactSet, or S&P Capital IQ where available. This prompt is for research assistance only and does not constitute financial advice.*
 """
     return prompt.strip()
 
