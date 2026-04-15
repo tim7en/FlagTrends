@@ -221,6 +221,63 @@ def _run_trend_scan(asset_type: str, progress=None) -> list[dict]:
             tf = ts.timeframes.get(label)
             row[f"tf_{label}_dir"] = tf.direction    if tf else "N/A"
             row[f"tf_{label}_chg"] = tf.change_pct   if tf else 0.0
+
+        # ── Drawdown & rapid-recovery detection (6M lookback) ─────────────────
+        try:
+            close_full = df["Close"].squeeze()
+            # Use last 6 months (~126 bars)
+            close_6m   = close_full.iloc[-min(126, len(close_full)):]
+            roll_peak  = close_6m.cummax()
+            dd_series  = (close_6m - roll_peak) / roll_peak * 100  # ≤ 0
+
+            trough_idx    = int(dd_series.values.argmin())          # index in 6m window
+            max_dd_pct    = float(dd_series.iloc[trough_idx])       # deepest drawdown %
+            trough_price  = float(close_6m.iloc[trough_idx])
+            current_price = float(close_6m.iloc[-1])
+            bars_since    = len(close_6m) - 1 - trough_idx          # bars from trough → now
+
+            # How fast was the descent? Find peak before trough
+            peak_before_idx = int(close_6m.iloc[:trough_idx + 1].values.argmax()) if trough_idx > 0 else 0
+            drawdown_bars   = max(trough_idx - peak_before_idx, 1)  # bars peak → trough
+
+            recovery_pct = (current_price - trough_price) / trough_price * 100 if trough_price > 0 else 0.0
+            # velocity: recovery % per bar (annualised feel: * 252 / bars)
+            velocity     = recovery_pct / max(bars_since, 1)
+
+            # V-Score 0-100:
+            # 45 pts depth  (capped at -50% → 45 pts)
+            # 35 pts recovery % (capped at 50% → 35 pts)
+            # 20 pts velocity  (≥ 1%/bar = 20, ≥ 0.5 = 15, ≥ 0.2 = 8, else 0)
+            depth_pts    = min(abs(max_dd_pct) / 50 * 45, 45)
+            rec_pts      = min(recovery_pct    / 50 * 35, 35)
+            vel_pts      = 20 if velocity >= 1.0 else 15 if velocity >= 0.5 else 8 if velocity >= 0.2 else 2 if velocity > 0 else 0
+            v_score      = round(depth_pts + rec_pts + vel_pts, 1)
+
+            # Qualified = meaningful drawdown + real recovery + recent
+            dd_qualified = (
+                abs(max_dd_pct) >= 10.0
+                and recovery_pct   >= 5.0
+                and bars_since     <= 100
+            )
+
+            row.update({
+                "dd_max_pct":       round(max_dd_pct,    1),
+                "dd_recovery_pct":  round(recovery_pct,  1),
+                "dd_bars_since":    bars_since,
+                "dd_drawdown_bars": drawdown_bars,
+                "dd_velocity":      round(velocity,      3),
+                "dd_v_score":       v_score,
+                "dd_qualified":     dd_qualified,
+                "dd_trough_date":   str(close_6m.index[trough_idx].date()),
+                "dd_peak_date":     str(close_6m.index[peak_before_idx].date()),
+            })
+        except Exception:
+            row.update({
+                "dd_max_pct": None, "dd_recovery_pct": None, "dd_bars_since": None,
+                "dd_drawdown_bars": None, "dd_velocity": None, "dd_v_score": None,
+                "dd_qualified": False, "dd_trough_date": None, "dd_peak_date": None,
+            })
+
         rows.append(row)
 
     return rows
@@ -540,6 +597,138 @@ def _build_sector_table(scan_rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(records)
     df = df.sort_values("Avg 1Y%", ascending=False)
     return df
+
+
+def _build_drawdown_table(scan_rows: list[dict], min_v_score: float = 20.0) -> pd.DataFrame:
+    """
+    Per-symbol table of recent drawdown + rapid recovery events.
+    Sorted by V-Score descending — highest score = deepest + fastest V-shape.
+    """
+    qualified = [
+        r for r in scan_rows
+        if r.get("dd_qualified") and r.get("dd_v_score") is not None
+        and r["dd_v_score"] >= min_v_score
+    ]
+    if not qualified:
+        return pd.DataFrame()
+
+    records = []
+    for r in qualified:
+        records.append({
+            "Symbol":          r["symbol"],
+            "Name":            r.get("name", r["symbol"])[:28],
+            "Sector":          r.get("sector", "Other"),
+            "Price":           r.get("price"),
+            "Max Drawdown %":  r["dd_max_pct"],
+            "Recovery %":      r["dd_recovery_pct"],
+            "Bars Since Low":  r["dd_bars_since"],
+            "Drop Bars":       r["dd_drawdown_bars"],
+            "Velocity %/bar":  r["dd_velocity"],
+            "V-Score":         r["dd_v_score"],
+            "Trough Date":     r["dd_trough_date"],
+            "Peak Date":       r["dd_peak_date"],
+            "Signal":          r.get("daily_direction", ""),
+            "RSI":             r.get("rsi"),
+        })
+
+    df = pd.DataFrame(records)
+    df.sort_values("V-Score", ascending=False, inplace=True)
+    return df
+
+
+def _build_sector_drawdown_table(scan_rows: list[dict]) -> pd.DataFrame:
+    """
+    Sector-level aggregation of drawdown-recovery events.
+    Shows which sectors had the most event-driven dislocations + recoveries.
+    """
+    import statistics as _stats
+
+    qualified = [r for r in scan_rows if r.get("dd_qualified") and r.get("dd_v_score") is not None]
+    if not qualified:
+        return pd.DataFrame()
+
+    sectors: dict[str, list[dict]] = {}
+    all_sectors: dict[str, int] = {}
+    for r in scan_rows:
+        s = r.get("sector", "Other")
+        all_sectors[s] = all_sectors.get(s, 0) + 1
+    for r in qualified:
+        s = r.get("sector", "Other")
+        sectors.setdefault(s, []).append(r)
+
+    records = []
+    for sector, items in sorted(sectors.items()):
+        n_total    = all_sectors.get(sector, len(items))
+        n_events   = len(items)
+        pct_events = round(n_events / n_total * 100, 1)
+
+        def _avg(key: str) -> float | None:
+            vals = [r[key] for r in items if r.get(key) is not None]
+            return round(_stats.mean(vals), 1) if vals else None
+
+        max_drop    = min((r["dd_max_pct"]  for r in items), default=None)  # worst single
+        max_recov   = max((r["dd_recovery_pct"] for r in items), default=None)
+        avg_vscore  = _avg("dd_v_score")
+        avg_drop    = _avg("dd_max_pct")
+        avg_recov   = _avg("dd_recovery_pct")
+        avg_vel     = round(_stats.mean([r["dd_velocity"] for r in items if r.get("dd_velocity") is not None]), 3) if items else None
+        avg_bars    = _avg("dd_bars_since")
+
+        records.append({
+            "Sector":          sector,
+            "# Events":        n_events,
+            "% of Sector":     pct_events,
+            "Avg Drawdown %":  avg_drop,
+            "Worst Drop %":    round(max_drop, 1) if max_drop is not None else None,
+            "Avg Recovery %":  avg_recov,
+            "Best Recovery %": round(max_recov, 1) if max_recov is not None else None,
+            "Avg Velocity":    avg_vel,
+            "Avg V-Score":     avg_vscore,
+            "Avg Bars Since":  avg_bars,
+        })
+
+    df = pd.DataFrame(records)
+    df.sort_values("Avg V-Score", ascending=False, inplace=True)
+    return df
+
+
+def _style_drawdown_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def vscore_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        if val >= 70:
+            return "background-color: #e8f5e9; color: #1a7f3c; font-weight: bold"
+        if val >= 50:
+            return "background-color: #fff8e1; color: #e65100"
+        if val >= 30:
+            return "color: #b71c1c"
+        return ""
+
+    def drop_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        return "color: #c0392b; font-weight: bold" if val <= -20 else "color: #c0392b" if val < 0 else ""
+
+    def rec_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        return "color: #1a7f3c; font-weight: bold" if val >= 20 else "color: #1a7f3c" if val > 0 else ""
+
+    fmt: dict = {
+        "Max Drawdown %":  "{:+.1f}%",
+        "Recovery %":      "{:+.1f}%",
+        "Velocity %/bar":  "{:.3f}",
+        "V-Score":         "{:.1f}",
+        "RSI":             "{:.1f}",
+        "Price":           "{:.2f}",
+    }
+    return (
+        df.style
+        .map(vscore_color, subset=["V-Score"])
+        .map(drop_color,   subset=["Max Drawdown %"])
+        .map(rec_color,    subset=["Recovery %"])
+        .format(fmt, na_rep="—")
+    )
 
 
 def _build_recovery_table(scan_rows: list[dict]) -> pd.DataFrame:
@@ -1685,6 +1874,148 @@ def main() -> None:
                 height=460,
             )
             st.caption(f"{len(sector_df)} sectors  |  sorted by Avg 1Y %")
+
+            # ── Event-Driven Drawdown & Rapid Recovery ────────────────────────
+            st.divider()
+            st.subheader("⚡ Event-Driven Dislocations — Drawdown + Rapid Recovery (V-Shapes)")
+            st.caption(
+                "Identifies symbols that experienced a significant drawdown (≥10%) within the last "
+                "6 months and have since staged a meaningful recovery. **V-Score** blends drawdown depth "
+                "(45 pts), recovery % (35 pts), and velocity — recovery speed in %/bar (20 pts). "
+                "High V-Score + fast velocity = event-driven signature (sharp shock, rapid reprice). "
+                "Typical triggers: geopolitical shocks, earnings surprises, sector-wide de-risking events."
+            )
+
+            _vscore_min = st.slider(
+                "Minimum V-Score to show", min_value=0, max_value=80, value=25, step=5,
+                key="vscore_slider",
+            )
+
+            dd_sym_df  = _build_drawdown_table(scan_rows_s, min_v_score=_vscore_min)
+            dd_sect_df = _build_sector_drawdown_table(scan_rows_s)
+
+            if dd_sym_df.empty:
+                st.info("No symbols meet the current drawdown + recovery criteria. Lower the V-Score slider or run a full refresh.")
+            else:
+                # ── Top callouts ──────────────────────────────────────────────
+                _top_v  = dd_sym_df.iloc[0]
+                _top_d  = dd_sym_df.sort_values("Max Drawdown %").iloc[0]
+                _top_r  = dd_sym_df.sort_values("Recovery %", ascending=False).iloc[0]
+                _top_sp = dd_sym_df.sort_values("Velocity %/bar", ascending=False).iloc[0]
+                _col1, _col2, _col3, _col4 = st.columns(4)
+                _col1.metric("🏆 Highest V-Score",   f"{_top_v['Symbol']}",  f"{_top_v['V-Score']:.0f} pts")
+                _col2.metric("📉 Deepest Drop",       f"{_top_d['Symbol']}",  f"{_top_d['Max Drawdown %']:+.1f}%")
+                _col3.metric("🚀 Strongest Recovery", f"{_top_r['Symbol']}",  f"{_top_r['Recovery %']:+.1f}%")
+                _col4.metric("⚡ Fastest Recovery",   f"{_top_sp['Symbol']}", f"{_top_sp['Velocity %/bar']:.2f}%/bar")
+
+                # ── Scatter: drawdown depth vs recovery % (sized by velocity) ─
+                fig_dd = go.Figure()
+                _colors_dd = [
+                    "#1a9688" if v >= 70 else "#f57c00" if v >= 50 else "#e53935"
+                    for v in dd_sym_df["V-Score"]
+                ]
+                _sizes = [max(6, min(v / 2, 30)) for v in dd_sym_df["V-Score"]]
+                fig_dd.add_trace(go.Scatter(
+                    x=dd_sym_df["Max Drawdown %"],
+                    y=dd_sym_df["Recovery %"],
+                    mode="markers+text",
+                    text=dd_sym_df["Symbol"],
+                    textposition="top center",
+                    textfont=dict(size=9),
+                    marker=dict(color=_colors_dd, size=_sizes, opacity=0.85,
+                                line=dict(width=0.5, color="white")),
+                    hovertemplate=(
+                        "<b>%{text}</b><br>"
+                        "Max Drawdown: %{x:+.1f}%<br>"
+                        "Recovery: %{y:+.1f}%<extra></extra>"
+                    ),
+                    customdata=dd_sym_df["V-Score"],
+                ))
+                fig_dd.add_vline(x=-20, line_dash="dot", line_color="#aaa",
+                                 annotation_text="–20% threshold", annotation_font_size=9)
+                fig_dd.add_hline(y=20, line_dash="dot", line_color="#aaa",
+                                 annotation_text="+20% recovery", annotation_font_size=9)
+                fig_dd.update_layout(
+                    title="Max Drawdown % vs Recovery % — bubble size = V-Score",
+                    template="plotly_white",
+                    height=480,
+                    margin=dict(l=50, r=30, t=55, b=50),
+                    xaxis_title="Max Drawdown (6M) %",
+                    yaxis_title="Recovery from Trough %",
+                    hovermode="closest",
+                )
+                st.plotly_chart(fig_dd, use_container_width=True)
+
+                # ── Per-symbol ranked table ───────────────────────────────────
+                st.markdown("**Symbol Rankings — Sorted by V-Score**")
+                show_cols = [
+                    "Symbol", "Name", "Sector", "Price",
+                    "Max Drawdown %", "Recovery %", "Bars Since Low", "Drop Bars",
+                    "Velocity %/bar", "V-Score", "Trough Date", "Signal", "RSI",
+                ]
+                show_cols = [c for c in show_cols if c in dd_sym_df.columns]
+                st.dataframe(
+                    _style_drawdown_table(dd_sym_df[show_cols]),
+                    use_container_width=True,
+                    height=480,
+                )
+                st.caption(
+                    f"{len(dd_sym_df)} qualified symbols  |  "
+                    "V-Score: 0–100 — higher = deeper drop + stronger + faster recovery  |  "
+                    "Velocity = recovery % ÷ bars since trough  |  "
+                    "Drop Bars = bars from peak to trough (fewer = more event-driven)"
+                )
+
+                # ── Sector-level digest ───────────────────────────────────────
+                if not dd_sect_df.empty:
+                    st.divider()
+                    st.subheader("🗂 Sector Drawdown Digest")
+                    st.caption("Which sectors had the most widespread dislocation events?")
+                    fig_sect_dd = go.Figure()
+                    _ds = dd_sect_df.sort_values("Avg V-Score", ascending=True)
+                    _bar_colors = [
+                        "#1a9688" if v >= 60 else "#f57c00" if v >= 40 else "#e53935"
+                        for v in _ds["Avg V-Score"]
+                    ]
+                    fig_sect_dd.add_trace(go.Bar(
+                        y=_ds["Sector"],
+                        x=_ds["Avg V-Score"],
+                        orientation="h",
+                        marker_color=_bar_colors,
+                        text=[f"{v:.0f}  ({n} events)" for v, n in zip(_ds["Avg V-Score"], _ds["# Events"])],
+                        textposition="outside",
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "Avg V-Score: %{x:.1f}<br>"
+                            "Events: %{customdata}<extra></extra>"
+                        ),
+                        customdata=_ds["# Events"],
+                    ))
+                    fig_sect_dd.update_layout(
+                        title="Sector Avg V-Score (Drawdown + Recovery Events)",
+                        template="plotly_white",
+                        height=max(360, len(_ds) * 30 + 80),
+                        margin=dict(l=20, r=100, t=50, b=40),
+                        xaxis=dict(range=[0, 105], title="Avg V-Score"),
+                        yaxis=dict(tickfont=dict(size=11)),
+                    )
+                    st.plotly_chart(fig_sect_dd, use_container_width=True)
+
+                    fmt_s = {
+                        "% of Sector":     "{:.1f}%",
+                        "Avg Drawdown %":  "{:+.1f}%",
+                        "Worst Drop %":    "{:+.1f}%",
+                        "Avg Recovery %":  "{:+.1f}%",
+                        "Best Recovery %": "{:+.1f}%",
+                        "Avg Velocity":    "{:.3f}",
+                        "Avg V-Score":     "{:.1f}",
+                        "Avg Bars Since":  "{:.0f}",
+                    }
+                    st.dataframe(
+                        dd_sect_df.style.format(fmt_s, na_rep="—"),
+                        use_container_width=True,
+                        height=400,
+                    )
 
             # ── Recovery from Recent Lows ─────────────────────────────────────
             st.divider()
