@@ -542,6 +542,129 @@ def _build_sector_table(scan_rows: list[dict]) -> pd.DataFrame:
     return df
 
 
+def _build_recovery_table(scan_rows: list[dict]) -> pd.DataFrame:
+    """
+    Sector-level 'from recent lows' recovery analysis.
+
+    Metrics per sector:
+    - Avg % above 52W low          → how far recovered from floor
+    - Median % above 52W low       → immune to outliers
+    - Avg % below 52W high         → proximity to ceiling
+    - % symbols above their 52W midpoint   → breadth of recovery
+    - % symbols with RSI > 50      → momentum breadth
+    - % symbols with Bullish daily signal  → signal breadth
+    - Strength Score 0–100         → composite
+    """
+    import statistics as _stats
+
+    rows = [r for r in scan_rows if r.get("sector")]
+    if not rows:
+        return pd.DataFrame()
+
+    sectors: dict[str, list[dict]] = {}
+    for r in rows:
+        sectors.setdefault(r["sector"], []).append(r)
+
+    records = []
+    for sector, items in sorted(sectors.items()):
+        n = len(items)
+
+        # --- recovery from 52W low ------------------------------------------
+        from_low  = [r["pct_from_52w_low"]  for r in items if r.get("pct_from_52w_low")  is not None]
+        from_high = [r["pct_from_52w_high"] for r in items if r.get("pct_from_52w_high") is not None]
+
+        avg_from_low   = round(_stats.mean(from_low),   1) if from_low   else None
+        med_from_low   = round(_stats.median(from_low), 1) if from_low   else None
+        avg_from_high  = round(_stats.mean(from_high),  1) if from_high  else None
+
+        # --- breadth: % above 52W midpoint (price is in upper half of range) -
+        above_mid = sum(
+            1 for r in items
+            if r.get("pct_from_52w_low") is not None
+            and r.get("pct_from_52w_high") is not None
+            and r["pct_from_52w_low"] > abs(r["pct_from_52w_high"])
+        )
+        pct_above_mid = round(above_mid / n * 100, 1)
+
+        # --- RSI breadth ----------------------------------------------------
+        rsis = [r["rsi"] for r in items if r.get("rsi") is not None]
+        pct_rsi_bull = round(sum(1 for v in rsis if v > 50) / len(rsis) * 100, 1) if rsis else 0.0
+        avg_rsi      = round(_stats.mean(rsis), 1) if rsis else None
+
+        # --- signal breadth -------------------------------------------------
+        pct_bull_signal = round(
+            sum(1 for r in items if "BULL" in r.get("daily_direction", "")) / n * 100, 1
+        )
+        pct_bear_signal = round(
+            sum(1 for r in items if "BEAR" in r.get("daily_direction", "")) / n * 100, 1
+        )
+
+        # --- composite Strength Score 0-100 ---------------------------------
+        # 30 pts: avg from low (capped at 50% → 30 pts)
+        # 20 pts: pct above 52W midpoint (0-100% → 0-20 pts)
+        # 20 pts: RSI breadth (0-100% → 0-20 pts)
+        # 20 pts: bullish signal breadth (0-100% → 0-20 pts)
+        # 10 pts: avg RSI (30-80 normalised)
+        s_low   = min((avg_from_low  or 0) / 50 * 30, 30)
+        s_mid   = pct_above_mid  / 100 * 20
+        s_rsi_b = pct_rsi_bull   / 100 * 20
+        s_sig   = pct_bull_signal / 100 * 20
+        s_rsi_v = min(max(((avg_rsi or 50) - 30) / 50 * 10, 0), 10)
+        strength_score = round(s_low + s_mid + s_rsi_b + s_sig + s_rsi_v, 1)
+
+        records.append({
+            "Sector":            sector,
+            "# Symbols":         n,
+            "Avg % from Low":    avg_from_low,
+            "Med % from Low":    med_from_low,
+            "Avg % from High":   avg_from_high,
+            "% Above Mid":       pct_above_mid,
+            "RSI > 50 %":        pct_rsi_bull,
+            "Bull Signal %":     pct_bull_signal,
+            "Bear Signal %":     pct_bear_signal,
+            "Avg RSI":           avg_rsi,
+            "Strength Score":    strength_score,
+        })
+
+    df = pd.DataFrame(records)
+    df.sort_values("Strength Score", ascending=False, inplace=True)
+    return df
+
+
+def _style_recovery_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def score_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        if val >= 60:
+            return "color: #1a7f3c; font-weight: bold"
+        if val >= 40:
+            return "color: #e65100"
+        return "color: #c0392b"
+
+    def pct_color(val: object) -> str:
+        if not isinstance(val, (int, float)):
+            return ""
+        return "color: #1a7f3c" if val >= 0 else "color: #c0392b"
+
+    fmt = {
+        "Avg % from Low":  "{:+.1f}%",
+        "Med % from Low":  "{:+.1f}%",
+        "Avg % from High": "{:+.1f}%",
+        "% Above Mid":     "{:.1f}%",
+        "RSI > 50 %":      "{:.1f}%",
+        "Bull Signal %":   "{:.1f}%",
+        "Bear Signal %":   "{:.1f}%",
+        "Avg RSI":         "{:.1f}",
+        "Strength Score":  "{:.1f}",
+    }
+    return (
+        df.style
+        .map(score_color, subset=["Strength Score"])
+        .map(pct_color,   subset=["Avg % from Low", "Med % from Low"])
+        .format(fmt, na_rep="—")
+    )
+
+
 def _style_sector_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     def chg_color(val: object) -> str:
         if not isinstance(val, (int, float)):
@@ -1562,6 +1685,107 @@ def main() -> None:
                 height=460,
             )
             st.caption(f"{len(sector_df)} sectors  |  sorted by Avg 1Y %")
+
+            # ── Recovery from Recent Lows ─────────────────────────────────────
+            st.divider()
+            st.subheader("📈 Sector Recovery from 52W Lows — Strength & Resistance")
+            st.caption(
+                "Ranks sectors by how strongly they have bounced from their 52-week lows. "
+                "Higher Strength Score = more symbols well above their floor, with bullish momentum. "
+                "Watch for sectors with high recovery breadth (% Above Mid) + high RSI breadth — these "
+                "are exhibiting organised sector-wide recovery, not just a handful of outliers."
+            )
+
+            rec_df = _build_recovery_table(scan_rows_s)
+            if not rec_df.empty:
+                # ── Top / Bottom sector callouts ──────────────────────────────
+                _rc1, _rc2, _rc3 = st.columns(3)
+                _top3    = rec_df.head(3)["Sector"].tolist()
+                _bot3    = rec_df.tail(3)["Sector"].tolist()
+                _top_rsi = rec_df.sort_values("RSI > 50 %", ascending=False).head(1)["Sector"].iloc[0]
+                _rc1.metric("🥇 Strongest Recovery",  _top3[0] if _top3 else "—")
+                _rc2.metric("🥈 #2 Sector",           _top3[1] if len(_top3) > 1 else "—")
+                _rc3.metric("🥉 #3 Sector",           _top3[2] if len(_top3) > 2 else "—")
+                _rc4, _rc5, _rc6 = st.columns(3)
+                _rc4.metric("📉 Weakest Sector",      _bot3[0] if _bot3 else "—")
+                _rc5.metric("📡 Best RSI Breadth",    _top_rsi)
+                _best_bull = rec_df.sort_values("Bull Signal %", ascending=False).head(1)["Sector"].iloc[0]
+                _rc6.metric("⚡ Most Bullish Signals", _best_bull)
+
+                # ── Strength Score horizontal bar chart ───────────────────────
+                rec_sorted = rec_df.sort_values("Strength Score")
+                _score_colors = [
+                    "#1a9688" if v >= 60 else "#f57c00" if v >= 40 else "#e53935"
+                    for v in rec_sorted["Strength Score"]
+                ]
+                fig_rec = go.Figure(go.Bar(
+                    x=rec_sorted["Strength Score"],
+                    y=rec_sorted["Sector"],
+                    orientation="h",
+                    marker_color=_score_colors,
+                    text=[f"{v:.0f}" for v in rec_sorted["Strength Score"]],
+                    textposition="outside",
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "Strength Score: %{x:.1f}<extra></extra>"
+                    ),
+                ))
+                fig_rec.update_layout(
+                    title="Sector Strength Score — Recovery from 52W Lows (0–100)",
+                    template="plotly_white",
+                    height=max(380, len(rec_sorted) * 28 + 80),
+                    margin=dict(l=20, r=80, t=50, b=40),
+                    xaxis=dict(range=[0, 105], title="Score"),
+                    yaxis=dict(tickfont=dict(size=11)),
+                )
+                st.plotly_chart(fig_rec, use_container_width=True)
+
+                # ── Recovery breadth grouped bar ──────────────────────────────
+                rec_sorted2 = rec_df.sort_values("Avg % from Low", ascending=False)
+                fig_bread = go.Figure()
+                fig_bread.add_trace(go.Bar(
+                    name="Avg % Above 52W Low",
+                    x=rec_sorted2["Sector"],
+                    y=rec_sorted2["Avg % from Low"],
+                    marker_color="#42a5f5",
+                    text=[f"{v:+.1f}%" for v in rec_sorted2["Avg % from Low"]],
+                    textposition="outside",
+                ))
+                fig_bread.add_trace(go.Bar(
+                    name="% Symbols Above 52W Midpoint",
+                    x=rec_sorted2["Sector"],
+                    y=rec_sorted2["% Above Mid"],
+                    marker_color="#66bb6a",
+                ))
+                fig_bread.add_trace(go.Bar(
+                    name="RSI > 50 Breadth %",
+                    x=rec_sorted2["Sector"],
+                    y=rec_sorted2["RSI > 50 %"],
+                    marker_color="#ffa726",
+                ))
+                fig_bread.update_layout(
+                    barmode="group",
+                    title="Recovery Breadth by Sector (from 52W Lows)",
+                    template="plotly_white",
+                    height=440,
+                    margin=dict(l=30, r=30, t=50, b=90),
+                    yaxis_title="%",
+                    xaxis_tickangle=-40,
+                    legend=dict(orientation="h", y=1.07),
+                )
+                st.plotly_chart(fig_bread, use_container_width=True)
+
+                # ── Recovery detail table ─────────────────────────────────────
+                st.dataframe(
+                    _style_recovery_table(rec_df),
+                    use_container_width=True,
+                    height=480,
+                )
+                st.caption(
+                    "Strength Score = weighted composite of: avg % above 52W low (30 pts), "
+                    "% symbols in upper half of 52W range (20 pts), RSI >50 breadth (20 pts), "
+                    "bullish signal breadth (20 pts), avg RSI level (10 pts). Max = 100."
+                )
 
             # ── Drill-down: symbols within a sector ───────────────────────────
             st.divider()

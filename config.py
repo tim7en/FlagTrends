@@ -20,11 +20,16 @@ SYMBOL_MAP: dict[str, str] = {
     "COCOA":        "CC=F",      # Cocoa
     "COFFEE":       "KC=F",      # Coffee C
     "CORN":         "ZC=F",      # Corn
+    "COTTON":       "CT=F",      # Cotton #2
     "HG":           "HG=F",      # Copper
     "HO":           "HO=F",      # Heating Oil
+    "LHOGS":        "HE=F",      # Lean Hogs
+    "LTCATTLE":     "LE=F",      # Live Cattle
     "NG":           "NG=F",      # Henry Hub Natural Gas
+    "OJ":           "OJ=F",      # Orange Juice
     "PA":           "PA=F",      # Palladium
     "PL":           "PL=F",      # Platinum
+    "RBOB":         "RB=F",      # RBOB Gasoline
     "SOYBEAN":      "ZS=F",      # Soybean
     "SUGAR":        "SB=F",      # Sugar #11
     "WHEAT":        "ZW=F",      # Wheat
@@ -165,6 +170,28 @@ SYMBOL_MAP: dict[str, str] = {
 # Sectors: Technology, Finance, Automobile, Industrial, Telecommunication,
 #          Energy, Materials, Healthcare, Consumer Services, Consumer Goods, Luxury
 SECTOR_MAP: dict[str, str] = {
+    # ── Commodities ───────────────────────────────────────────────────────────
+    "BRN":      "Commodities — Energy",
+    "CL":       "Commodities — Energy",
+    "HO":       "Commodities — Energy",
+    "NG":       "Commodities — Energy",
+    "RBOB":     "Commodities — Energy",
+    "WT":       "Commodities — Energy",
+    "XAUUSD":   "Commodities — Metals",
+    "XAGUSD":   "Commodities — Metals",
+    "HG":       "Commodities — Metals",
+    "PA":       "Commodities — Metals",
+    "PL":       "Commodities — Metals",
+    "COCOA":    "Commodities — Softs",
+    "COFFEE":   "Commodities — Softs",
+    "COTTON":   "Commodities — Softs",
+    "OJ":       "Commodities — Softs",
+    "SUGAR":    "Commodities — Softs",
+    "CORN":     "Commodities — Grains",
+    "SOYBEAN":  "Commodities — Grains",
+    "WHEAT":    "Commodities — Grains",
+    "LHOGS":    "Commodities — Livestock",
+    "LTCATTLE": "Commodities — Livestock",
     # ── Technology ────────────────────────────────────────────────────────────
     "A":      "Technology",   # Agilent Technologies
     "AAPL":   "Technology",
