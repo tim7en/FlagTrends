@@ -689,6 +689,202 @@ def _style_earnings_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     return styler
 
 
+# ── AI research prompt builder ────────────────────────────────────────────────
+
+def _build_ai_prompt(
+    er_rows: list[dict],
+    trend_rows: list[dict],
+) -> str:
+    """
+    Build a structured investment-research prompt for any LLM (Claude, GPT, etc.)
+    from a list of earnings/analyst rows and the corresponding trend-scan rows.
+
+    The template is grounded in:
+    - Benjamin Graham's "Intelligent Investor" framework (margin of safety,
+      intrinsic value, Mr. Market, net-net value, P/E normalisation)
+    - Jack Schwager's technical analysis principles (trend confirmation,
+      momentum, volume conviction, support/resistance, risk/reward)
+    """
+    if not er_rows:
+        return ""
+
+    today_str = datetime.date.today().strftime("%B %d, %Y")
+
+    # Build a lookup from symbol → trend row
+    trend_map: dict[str, dict] = {r["symbol"]: r for r in (trend_rows or [])}
+
+    # ── Per-symbol data block ─────────────────────────────────────────────────
+    sym_blocks: list[str] = []
+    for r in er_rows:
+        sym    = r["symbol"]
+        name   = r.get("name", sym)
+        sector = r.get("sector", "—")
+        price  = r.get("price")
+        mt     = r.get("mean_target")
+        lt     = r.get("low_target")
+        ht     = r.get("high_target")
+        up     = r.get("upside_pct")
+        na     = r.get("num_analysts")
+        cons   = _consensus_label(r)
+        sb     = r.get("strong_buy")  or 0
+        b      = r.get("buy")         or 0
+        h      = r.get("hold")        or 0
+        s      = r.get("sell")        or 0
+        ss     = r.get("strong_sell") or 0
+        ne     = r.get("next_earnings")
+        eps_c  = r.get("eps_curr_yr")
+        eps_n  = r.get("eps_next_yr")
+
+        tr = trend_map.get(sym, {})
+        rsi         = tr.get("rsi")
+        ytd         = tr.get("ytd_chg")
+        chg_1y      = tr.get("tf_1Y_chg")
+        chg_6m      = tr.get("tf_6M_chg")
+        chg_2m      = tr.get("tf_2M_chg")
+        dir_1y      = tr.get("tf_1Y_dir", "N/A")
+        dir_daily   = tr.get("daily_direction", "N/A")
+        pct_52h     = tr.get("pct_from_52w_high")
+        pct_52l     = tr.get("pct_from_52w_low")
+        score       = tr.get("daily_score")
+
+        def _fmt(v, fmt=".2f", sfx=""):
+            return f"{v:{fmt}}{sfx}" if v is not None else "N/A"
+
+        pe_implied = None
+        if price and price > 0 and eps_c and eps_c > 0:
+            pe_implied = round(price / eps_c, 1)
+        eps_growth = None
+        if eps_c and eps_c > 0 and eps_n:
+            eps_growth = round((eps_n - eps_c) / abs(eps_c) * 100, 1)
+
+        block = f"""
+### {sym} — {name}
+**Sector:** {sector}
+**Current Price:** ${_fmt(price)} | **52W Range:** {_fmt(pct_52h, '+.1f', '% vs high')} / {_fmt(pct_52l, '+.1f', '% vs low')}
+
+#### Analyst Estimates & Valuation
+| Metric | Value |
+|---|---|
+| Mean Price Target | ${_fmt(mt)} |
+| Low / High Target | ${_fmt(lt)} / ${_fmt(ht)} |
+| Analyst Upside | {_fmt(up, '+.1f', '%')} |
+| # Analysts | {na if na is not None else 'N/A'} |
+| Consensus | {cons} (SB:{sb} B:{b} H:{h} S:{s} SS:{ss}) |
+| EPS Est Current Yr | ${_fmt(eps_c)} |
+| EPS Est Next Yr | ${_fmt(eps_n)} |
+| Implied P/E (curr yr) | {_fmt(pe_implied, '.1f', 'x') if pe_implied else 'N/A'} |
+| EPS Growth (YoY est) | {_fmt(eps_growth, '+.1f', '%') if eps_growth is not None else 'N/A'} |
+| Next Earnings Date | {ne.strftime('%Y-%m-%d') if ne else 'N/A'} |
+
+#### Technical Picture (Schwager Framework)
+| Metric | Value |
+|---|---|
+| RSI (14-day) | {_fmt(rsi, '.1f')} |
+| YTD Return | {_fmt(ytd, '+.1f', '%')} |
+| 2M / 6M / 1Y Change | {_fmt(chg_2m, '+.1f', '%')} / {_fmt(chg_6m, '+.1f', '%')} / {_fmt(chg_1y, '+.1f', '%')} |
+| 1Y Trend Direction | {dir_1y} |
+| Daily Break Signal | {dir_daily} (score {score if score is not None else 'N/A'}) |
+"""
+        sym_blocks.append(block.strip())
+
+    # ── Prompt assembly ────────────────────────────────────────────────────────
+    symbols_list = ", ".join(r["symbol"] for r in er_rows)
+    sectors_list = ", ".join(sorted({r.get("sector", "Other") for r in er_rows}))
+    n = len(er_rows)
+
+    prompt = f"""# Portfolio Investment Research Request
+**Date:** {today_str}
+**Universe:** {n} symbol(s) — {symbols_list}
+**Sectors covered:** {sectors_list}
+
+---
+
+## Context & Methodology
+
+You are acting as a senior investment analyst combining two complementary frameworks:
+
+1. **Benjamin Graham — "The Intelligent Investor" (value discipline)**
+   - Assess margin of safety: is the current price meaningfully below intrinsic value?
+   - Normalise earnings over a full business cycle (avoid single-year P/E distortion)
+   - Distinguish between investment-grade businesses and speculative ones
+   - Apply net-net and asset-based valuation checks where applicable
+   - Treat current market price as an opinion, not a fact ("Mr. Market")
+   - Demand a minimum 20-30% margin of safety before assigning a BUY rating
+
+2. **Jack Schwager — Technical Analysis & Market Wizards principles**
+   - Confirm fundamental thesis with price-trend alignment
+   - Use RSI divergence, 52-week range positioning, and momentum for timing
+   - Assess risk/reward: is the technical setup constructive or deteriorating?
+   - Look for volume conviction behind breakouts and trend changes
+   - Note key support/resistance levels implied by 52W high/low proximity
+   - A strong fundamental case loses urgency when price is technically overextended
+
+---
+
+## Symbol Data (as of {today_str})
+
+{chr(10).join(f"---{chr(10)}{b}" for b in sym_blocks)}
+
+---
+
+## Investment Analysis Tasks
+
+For **each symbol above**, please provide a structured analysis section:
+
+### 1. Valuation Assessment (Graham lens)
+- Estimate intrinsic value range using: (a) P/E normalisation vs sector average, (b) earnings power value (EPV), (c) analyst target as a market-consensus anchor
+- Comment on margin of safety at the current price vs the mean analyst target
+- Is the implied P/E reasonable given the sector and growth rate?
+- Flag any "earnings quality" concerns (e.g. very high P/E with negative EPS growth)
+
+### 2. Business & Sector Moat
+- What durable competitive advantages (if any) does this business possess? (pricing power, network effects, switching costs, cost advantages, intangibles)
+- How defensible is the sector position given current macro/sector dynamics?
+- Comment on any known sector news, regulatory risk, or structural tailwinds/headwinds relevant to this sector as of {today_str}
+
+### 3. Technical Picture (Schwager lens)
+- Interpret the RSI: overbought (>70), oversold (<30), or neutral?
+- Characterise the trend: is 1Y direction aligned with 2M/6M momentum?
+- What does the 52W range position suggest about risk/reward entry?
+- Does the daily break signal corroborate or conflict with the fundamental thesis?
+
+### 4. Market Dynamics & Sentiment
+- Summarise analyst consensus sentiment and any notable divergence between low/high targets
+- Comment on upcoming earnings as a near-term catalyst or risk event
+- Consider macro backdrop (rates, growth expectations, sector rotation themes)
+
+### 5. Investment Rating & Recommendation
+Provide a clear rating from the following scale, with one-paragraph justification:
+| Rating | Meaning |
+|---|---|
+| **STRONG BUY** | Significant margin of safety + constructive technical setup |
+| **BUY** | Reasonable value + trend support |
+| **HOLD** | Fair value — no urgent buy or sell trigger |
+| **REDUCE** | Overvalued or deteriorating fundamentals — trim on strength |
+| **SELL** | Materially overvalued or broken technical + fundamental story |
+
+Also provide:
+- **Key Bull Case:** (2-3 bullets)
+- **Key Bear / Risk Case:** (2-3 bullets)
+- **Price Target Range:** low / base / high (12-month view)
+- **Suggested Position Sizing guidance** (core / tactical / avoid) based on conviction and volatility
+
+---
+
+## Portfolio-Level Summary (after analysing all symbols)
+
+- Rank the symbols from most to least attractive on a combined Graham-Schwager basis
+- Identify any meaningful sector concentration risk in this universe
+- Highlight the single best risk/reward opportunity and the single highest-risk holding
+- Provide a suggested overall portfolio posture: offensive (growth/momentum), defensive (value/quality), or balanced
+
+---
+
+*Data sourced from yfinance. Analyst estimates are consensus; individual analyst views vary. This prompt is for research assistance only and does not constitute financial advice.*
+"""
+    return prompt.strip()
+
+
 # ── Chart ─────────────────────────────────────────────────────────────────────
 
 def _make_chart(
@@ -1251,18 +1447,59 @@ def main() -> None:
             _all_syms_raw = [s for s in _all_syms_raw
                              if s["asset_type"].lower() == asset_type.lower()]
         _all_sym_options = sorted(s["symbol"] for s in _all_syms_raw)
+        _all_sym_set     = set(_all_sym_options)
 
-        # Pre-populate from sector drill-down (or keep current multiselect state)
+        # ── Paste/type a symbol list ──────────────────────────────────────────
+        st.markdown("**Paste a list of symbols** (comma, space, or newline separated):")
+        _paste_input = st.text_area(
+            "Symbol list",
+            placeholder='e.g.  BX, PSFE, KKR, APO, MS GS EG NVDA GOOGL MSFT',
+            height=70,
+            key="paste_sym_input",
+            label_visibility="collapsed",
+        )
+        _paste_col1, _paste_col2, _paste_col3 = st.columns([2, 2, 5])
+
+        if _paste_col1.button("➕ Add to Selection", key="btn_paste_add", disabled=not _paste_input.strip()):
+            import re as _re
+            _parsed = [s.upper().strip() for s in _re.split(r"[\s,;]+", _paste_input.strip()) if s.strip()]
+            _valid   = [s for s in _parsed if s in _all_sym_set]
+            _invalid = [s for s in _parsed if s not in _all_sym_set]
+            _merged  = list(dict.fromkeys(st.session_state.get("earnings_symbols", []) + _valid))
+            st.session_state["earnings_symbols"] = _merged
+            st.session_state["earnings_data"]    = None
+            if _invalid:
+                st.warning(f"⚠️ Not found in symbol list: {', '.join(_invalid)}")
+            if _valid:
+                st.success(f"✅ Added {len(_valid)} symbols. Queue: {len(_merged)} total.")
+            st.rerun()
+
+        if _paste_col2.button("🔄 Replace Selection", key="btn_paste_replace", disabled=not _paste_input.strip()):
+            import re as _re
+            _parsed = [s.upper().strip() for s in _re.split(r"[\s,;]+", _paste_input.strip()) if s.strip()]
+            _valid   = [s for s in _parsed if s in _all_sym_set]
+            _invalid = [s for s in _parsed if s not in _all_sym_set]
+            st.session_state["earnings_symbols"] = _valid
+            st.session_state["earnings_data"]    = None
+            if _invalid:
+                st.warning(f"⚠️ Not found in symbol list: {', '.join(_invalid)}")
+            if _valid:
+                st.success(f"✅ Selection replaced with {len(_valid)} symbols.")
+            st.rerun()
+
+        st.markdown("**Or pick from the full list:**")
+
+        # Pre-populate from paste / sector drill-down
         _preselected = [
             s for s in st.session_state.get("earnings_symbols", [])
-            if s in _all_sym_options
+            if s in _all_sym_set
         ]
 
         selected_symbols: list[str] = st.multiselect(
             "Symbols to fetch (" + str(len(_all_sym_options)) + " available)",
             options=_all_sym_options,
             default=_preselected,
-            placeholder="Choose symbols, or send them from Sector Analysis drill-down…",
+            placeholder="Choose symbols, or paste them above, or send from Sector Analysis…",
             key="earnings_multiselect",
         )
         # keep session state in sync with multiselect
@@ -1518,6 +1755,129 @@ def main() -> None:
                 st.caption(f"{len(full_df)} symbols  |  sorted by Analyst Upside%")
             else:
                 st.info("No symbols match the current filters.")
+
+            # ════════════════════════════════════════════════════════════════
+            # AI RESEARCH PROMPT GENERATOR
+            # ════════════════════════════════════════════════════════════════
+            st.divider()
+            st.subheader("🤖 AI Investment Research Prompt Generator")
+            st.caption(
+                "Generate a structured prompt pre-filled with the fetched data above.  "
+                "Paste it into Claude, ChatGPT, Gemini, or any LLM for portfolio analysis.  "
+                "The template applies **Benjamin Graham** value principles and "
+                "**Jack Schwager** technical analysis methodology."
+            )
+
+            # Symbol picker — select which of the fetched symbols to include
+            _prompt_sym_options = [r["symbol"] for r in er_rows]
+            _prompt_default     = _prompt_sym_options[:20]  # reasonable default cap
+
+            _pc1, _pc2 = st.columns([4, 2])
+            _prompt_selected = _pc1.multiselect(
+                "Symbols to include in prompt",
+                options=_prompt_sym_options,
+                default=_prompt_default,
+                key="prompt_sym_select",
+            )
+            _prompt_style = _pc2.radio(
+                "Analysis depth",
+                ["Full (all sections)", "Concise (rating + key points only)"],
+                key="prompt_style",
+                horizontal=True,
+            )
+
+            _gen_btn = st.button(
+                f"⚡ Generate Prompt  ({len(_prompt_selected)} symbols)",
+                type="primary",
+                disabled=not _prompt_selected,
+                key="btn_gen_prompt",
+            )
+
+            if _gen_btn or st.session_state.get("_last_prompt"):
+                if _gen_btn:
+                    # Filter er_rows to selected symbols only
+                    _sel_set     = set(_prompt_selected)
+                    _prompt_rows = [r for r in er_rows if r["symbol"] in _sel_set]
+                    _trend_rows  = st.session_state.get("trend_data") or []
+
+                    _raw_prompt = _build_ai_prompt(_prompt_rows, _trend_rows)
+
+                    # Concise mode: strip the long "Analysis Tasks" boilerplate
+                    if "Concise" in _prompt_style:
+                        _concise_suffix = """
+## Investment Analysis Tasks
+
+For each symbol above, provide:
+
+1. **Intrinsic Value vs Price** — is there a margin of safety? (Graham)
+2. **Technical Verdict** — trend aligned or conflicting? RSI signal? (Schwager)
+3. **Business Moat** — durable advantage or commodity business?
+4. **Rating** — STRONG BUY / BUY / HOLD / REDUCE / SELL with one-line rationale
+5. **Top Risk** — single biggest downside risk
+
+Then rank all symbols best-to-worst and give a portfolio-level posture.
+
+*Data sourced from yfinance. For research assistance only.*
+"""
+                        # Find the "## Investment Analysis Tasks" section and replace
+                        _split_marker = "## Investment Analysis Tasks"
+                        if _split_marker in _raw_prompt:
+                            _raw_prompt = (
+                                _raw_prompt[:_raw_prompt.index(_split_marker)]
+                                + _concise_suffix.strip()
+                            )
+
+                    st.session_state["_last_prompt"] = _raw_prompt
+
+                _prompt_text = st.session_state.get("_last_prompt", "")
+
+                if _prompt_text:
+                    # ── Download button ───────────────────────────────────────
+                    _dl_col, _info_col2 = st.columns([2, 5])
+                    _dl_col.download_button(
+                        label="⬇️ Download Prompt (.txt)",
+                        data=_prompt_text.encode("utf-8"),
+                        file_name=f"investment_prompt_{datetime.date.today()}.txt",
+                        mime="text/plain",
+                        key="dl_prompt",
+                    )
+                    _info_col2.info(
+                        f"Prompt is {len(_prompt_text):,} characters / "
+                        f"~{len(_prompt_text.split()):,} words.  "
+                        f"Paste into Claude, ChatGPT, Gemini, or any LLM."
+                    )
+
+                    # ── Copy-to-clipboard button (JS injection) ───────────────
+                    _escaped = (
+                        _prompt_text
+                        .replace("\\", "\\\\")
+                        .replace("`", "\\`")
+                        .replace("$", "\\$")
+                    )
+                    st.components.v1.html(
+                        f"""
+                        <button onclick="navigator.clipboard.writeText(`{_escaped}`).then(
+                            () => {{ this.innerText='✅ Copied!'; setTimeout(()=>{{this.innerText='📋 Copy to Clipboard'}},2000); }},
+                            () => {{ this.innerText='❌ Copy failed — use Download'; }}
+                        )"
+                        style="
+                            background:#1a7f3c; color:#fff; border:none;
+                            padding:8px 18px; border-radius:6px;
+                            font-size:14px; cursor:pointer; margin-bottom:6px;
+                        ">📋 Copy to Clipboard</button>
+                        """,
+                        height=50,
+                    )
+
+                    # ── Prompt preview (collapsible) ──────────────────────────
+                    with st.expander("👁️ Preview prompt", expanded=False):
+                        st.text_area(
+                            "Prompt text",
+                            value=_prompt_text,
+                            height=600,
+                            key="prompt_preview_area",
+                            label_visibility="collapsed",
+                        )
 
 
 if __name__ == "__main__":
